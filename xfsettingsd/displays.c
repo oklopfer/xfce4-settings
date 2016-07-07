@@ -113,6 +113,13 @@ static void             xfce_displays_helper_toggle_internal                (gpo
                                                                              gboolean                 lid_is_closed,
                                                                              XfceDisplaysHelper      *helper);
 
+static void             xfce_displays_helper_iio_sensor_appeared_cb         (GDBusConnection *connection,
+                                                                             const gchar     *name,
+                                                                             const gchar     *name_owner,
+                                                                             gpointer         data);
+static void             xfce_displays_helper_iio_sensor_vanished_cb         (GDBusConnection *connection,
+                                                                             const gchar     *name,
+                                                                             gpointer         data);
 
 
 struct _XfceDisplaysHelperClass
@@ -137,6 +144,9 @@ struct _XfceDisplaysHelper
     XfceDisplaysUPower *power;
     gint                phandler;
 #endif
+
+    guint               iio_watch_id;
+    GDBusProxy         *iio_proxy;
 
     GdkDisplay         *display;
     GdkWindow          *root_window;
@@ -262,6 +272,13 @@ xfce_displays_helper_init (XfceDisplaysHelper *helper)
                                                  G_CALLBACK (xfce_displays_helper_toggle_internal),
                                                  helper);
 #endif
+
+            helper->iio_watch_id = g_bus_watch_name (G_BUS_TYPE_SYSTEM,
+                                                     "net.hadess.SensorProxy",
+                                                     G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                     xfce_displays_helper_iio_sensor_appeared_cb,
+                                                     xfce_displays_helper_iio_sensor_vanished_cb,
+                                                     helper, NULL);
 
             /* open the channel */
             helper->channel = xfconf_channel_get ("displays");
@@ -511,6 +528,112 @@ xfce_displays_helper_screen_on_event (GdkXEvent *xevent,
     return GDK_FILTER_CONTINUE;
 }
 
+static void
+xfce_displays_helper_iio_sensor_apply_rotation (XfceDisplaysHelper *helper,
+                                                gint                rotation)
+{
+    GHashTable *props;
+    GHashTableIter iter;
+    void *key, *value;
+    gboolean need_apply = FALSE;
+
+    props = xfconf_channel_get_properties (helper->channel, NULL);
+    if (G_LIKELY (props != NULL))
+    {
+        g_hash_table_iter_init (&iter, props);
+        while (g_hash_table_iter_next (&iter, &key, &value))
+        {
+            if (g_str_has_suffix (key, "Rotation"))
+            {
+                if (rotation != g_value_get_int(value))
+                {
+                    xfconf_channel_set_int (helper->channel, key, rotation);
+                    need_apply = TRUE;
+                }
+            }
+        }
+        g_hash_table_destroy (props);
+    }
+
+    /* Apply orientation changes */
+    if (need_apply)
+        xfconf_channel_set_string (helper->channel, APPLY_SCHEME_PROP, DEFAULT_SCHEME_NAME);
+}
+static void
+xfce_displays_helper_iio_sensor_properties_changed (GDBusProxy *proxy,
+                                                    GVariant   *changed_properties,
+                                                    GStrv       invalidated_properties,
+                                                    gpointer    data)
+{
+    GVariant *v;
+    GVariantDict dict;
+    const gchar *orientation = NULL;
+    gint rotation = 0;
+
+    XfceDisplaysHelper *helper = XFCE_DISPLAYS_HELPER (data);
+
+    g_variant_dict_init (&dict, changed_properties);
+
+    if (g_variant_dict_contains (&dict, "AccelerometerOrientation"))
+    {
+        v = g_dbus_proxy_get_cached_property (helper->iio_proxy, "AccelerometerOrientation");
+        orientation = g_variant_get_string (v, NULL);
+        g_variant_unref (v);
+
+        if (g_strcmp0 (orientation, "normal") == 0)
+            rotation = 0;
+        else if (g_strcmp0 (orientation, "bottom-up") == 0)
+            rotation = 180;
+        else if (g_strcmp0 (orientation, "left-up") == 0)
+            rotation = 90;
+        else if (g_strcmp0 (orientation, "right-up") == 0)
+            rotation = 270;
+        else
+            return; // Handle "undefined" case.
+
+        xfce_displays_helper_iio_sensor_apply_rotation (helper, rotation);
+    }
+}
+
+static void
+xfce_displays_helper_iio_sensor_appeared_cb (GDBusConnection *connection,
+                                             const gchar     *name,
+                                             const gchar     *name_owner,
+                                             gpointer         data)
+{
+    GError *error = NULL;
+
+    XfceDisplaysHelper *helper = XFCE_DISPLAYS_HELPER (data);
+
+    helper->iio_proxy = g_dbus_proxy_new_for_bus_sync (G_BUS_TYPE_SYSTEM,
+                                                       G_DBUS_PROXY_FLAGS_NONE,
+                                                       NULL,
+                                                       "net.hadess.SensorProxy",
+                                                       "/net/hadess/SensorProxy",
+                                                       "net.hadess.SensorProxy",
+                                                       NULL, NULL);
+
+    g_signal_connect (G_OBJECT (helper->iio_proxy), "g-properties-changed",
+                      G_CALLBACK (xfce_displays_helper_iio_sensor_properties_changed), helper);
+
+    /* Accelerometer */
+    g_dbus_proxy_call_sync (helper->iio_proxy,
+                            "ClaimAccelerometer", NULL,
+                            G_DBUS_CALL_FLAGS_NONE,
+                            -1, NULL, &error);
+    g_assert_no_error (error);
+}
+
+static void
+xfce_displays_helper_iio_sensor_vanished_cb (GDBusConnection *connection,
+                                             const gchar     *name,
+                                             gpointer         data)
+{
+    XfceDisplaysHelper *helper = XFCE_DISPLAYS_HELPER (data);
+    if (helper->iio_proxy) {
+        g_clear_object (&helper->iio_proxy);
+    }
+}
 
 
 static void
