@@ -12,14 +12,19 @@ bin_PROGRAMS = \
 
 xfce4_appearance_settings_SOURCES = \
 	main.c \
-	images.h \
 	appearance-dialog_ui.h
 
 xfce4_appearance_settings_CFLAGS = \
 	$(GTK_CFLAGS) \
 	$(LIBXFCE4UI_CFLAGS) \
 	$(XFCONF_CFLAGS) \
-	$(PLATFORM_CFLAGS)
+	$(PLATFORM_CFLAGS) \
+    -DGTK_DISABLE_SINGLE_INCLUDES \
+    -DGDK_DISABLE_DEPRECATED \
+    -DGTK_DISABLE_DEPRECATED \
+    -DGSEAL_ENABLE \
+    -DGDK_PIXBUF_DISABLE_DEPRECATED \
+    -DG_DISABLE_DEPRECATED
 
 xfce4_appearance_settings_LDFLAGS = \
 	-no-undefined \
@@ -39,7 +44,7 @@ BUILT_SOURCES = \
 	appearance-dialog_ui.h
 
 appearance-dialog_ui.h: appearance-dialog.glade
-	exo-csource --static --strip-comments --strip-content --name=appearance_dialog_ui $< >$@
+	xdt-csource --static --strip-comments --strip-content --name=appearance_dialog_ui $< >$@
 
 endif
 

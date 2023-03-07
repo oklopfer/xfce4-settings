@@ -22,7 +22,13 @@ xfce4_mouse_settings_CFLAGS = \
 	$(XFCONF_CFLAGS) \
 	$(LIBX11_CFLAGS) \
 	$(LIBINPUT_CFLAGS) \
-	$(PLATFORM_CFLAGS)
+	$(PLATFORM_CFLAGS) \
+    -DGTK_DISABLE_SINGLE_INCLUDES \
+    -DGDK_DISABLE_DEPRECATED \
+    -DGTK_DISABLE_DEPRECATED \
+    -DGSEAL_ENABLE \
+    -DGDK_PIXBUF_DISABLE_DEPRECATED \
+    -DG_DISABLE_DEPRECATED
 
 xfce4_mouse_settings_LDFLAGS = \
 	-no-undefined \
@@ -52,7 +58,7 @@ BUILT_SOURCES = \
 	mouse-dialog_ui.h
 
 mouse-dialog_ui.h: mouse-dialog.glade
-	exo-csource --static --strip-comments --strip-content --name=mouse_dialog_ui $< >$@
+	xdt-csource --static --strip-comments --strip-content --name=mouse_dialog_ui $< >$@
 
 endif
 

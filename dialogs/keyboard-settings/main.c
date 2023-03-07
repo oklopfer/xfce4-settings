@@ -25,7 +25,8 @@
 
 #include <gtk/gtk.h>
 
-#include <libxfce4util/libxfce4util.h>
+#include <gdk/gdkx.h>
+
 #include <libxfce4ui/libxfce4ui.h>
 #include <xfconf/xfconf.h>
 
@@ -33,7 +34,7 @@
 
 
 
-static GdkNativeWindow opt_socket_id = 0;
+static gint            opt_socket_id = 0;
 static gboolean        opt_version = FALSE;
 static GOptionEntry    entries[] = {
   { "socket-id", 's', G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_INT, &opt_socket_id, N_("Settings manager socket"), N_("SOCKET ID") },
@@ -69,7 +70,7 @@ main (int    argc,
   xfce_textdomain (GETTEXT_PACKAGE, LOCALEDIR, "UTF-8");
 
   /* Initialize GTK+ and parse command line options */
-  if (G_UNLIKELY (!gtk_init_with_args (&argc, &argv, "", entries, PACKAGE, &error)))
+  if (G_UNLIKELY (!gtk_init_with_args (&argc, &argv, NULL, entries, PACKAGE, &error)))
     {
       if (G_LIKELY (error != NULL))
         {
@@ -89,7 +90,7 @@ main (int    argc,
   if (G_UNLIKELY (opt_version))
     {
       g_print ("%s %s (Xfce %s)\n\n", G_LOG_DOMAIN, PACKAGE_VERSION, xfce_version_string ());
-      g_print ("%s\n", "Copyright (c) 2008-2011");
+      g_print ("%s\n", "Copyright (c) 2008-2023");
       g_print ("\t%s\n\n", _("The Xfce development team. All rights reserved."));
       g_print (_("Please report bugs to <%s>."), PACKAGE_BUGREPORT);
       g_print ("\n");
@@ -122,14 +123,13 @@ main (int    argc,
     {
       /* Create and run the settings dialog */
       dialog = xfce_keyboard_settings_create_dialog (settings);
-      gtk_window_set_default_size (GTK_WINDOW (dialog), 450, -1);
 
       g_signal_connect (dialog, "response",
           G_CALLBACK (keyboard_settings_dialog_response), NULL);
       gtk_window_present (GTK_WINDOW (dialog));
 
       /* To prevent the settings dialog to be saved in the session */
-      gdk_set_sm_client_id ("FAKE ID");
+      gdk_x11_set_sm_client_id ("FAKE ID");
 
       gtk_main ();
     }
@@ -143,7 +143,7 @@ main (int    argc,
       gdk_notify_startup_complete ();
 
       /* To prevent the settings dialog to be saved in the session */
-      gdk_set_sm_client_id ("FAKE ID");
+      gdk_x11_set_sm_client_id ("FAKE ID");
 
       /* Enter the main loop */
       gtk_main ();

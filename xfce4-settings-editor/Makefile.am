@@ -27,7 +27,14 @@ xfce4_settings_editor_CFLAGS = \
 	$(LIBXFCE4UTIL_CFLAGS) \
 	$(LIBXFCE4UI_CFLAGS) \
 	$(XFCONF_CFLAGS) \
-	$(PLATFORM_CFLAGS)
+	$(DBUS_GLIB_CFLAGS) \
+	$(PLATFORM_CFLAGS) \
+    -DGTK_DISABLE_SINGLE_INCLUDES \
+    -DGDK_DISABLE_DEPRECATED \
+    -DGTK_DISABLE_DEPRECATED \
+    -DGSEAL_ENABLE \
+    -DGDK_PIXBUF_DISABLE_DEPRECATED \
+    -DG_DISABLE_DEPRECATED
 
 xfce4_settings_editor_LDFLAGS = \
 	-no-undefined \
@@ -58,18 +65,21 @@ xfce-settings-marshal.c: xfce-settings-marshal.list Makefile
 	&& glib-genmarshal --prefix=_xfce_settings_marshal --body $< >> $@
 
 DISTCLEANFILES = \
-	$(xfce4_settings_editor_built_sources)
+	$(xfce4_settings_editor_built_sources) \
+	$(desktop_DATA)
 
 BUILT_SOURCES = \
 	$(xfce4_settings_editor_built_sources)
+
+else
+
+DISTCLEANFILES = \
+	$(desktop_DATA)
 
 endif
 
 EXTRA_DIST = \
 	xfce-settings-marshal.list \
 	$(desktop_in_files)
-
-DISTCLEANFILES = \
-	$(desktop_DATA)
 
 # vi:set ts=8 sw=8 noet ai nocindent syntax=automake:

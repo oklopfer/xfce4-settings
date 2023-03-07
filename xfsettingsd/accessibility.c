@@ -118,7 +118,7 @@ xfce_accessibility_helper_init (XfceAccessibilityHelper *helper)
     helper->notification = NULL;
 #endif /* !HAVE_LIBNOTIFY */
 
-    if (XkbQueryExtension (GDK_DISPLAY (), &dummy, &dummy, &dummy, &dummy, &dummy))
+    if (XkbQueryExtension (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), &dummy, &dummy, &dummy, &dummy, &dummy))
     {
         /* open the channel */
         helper->channel = xfconf_channel_get ("accessibility");
@@ -135,7 +135,7 @@ xfce_accessibility_helper_init (XfceAccessibilityHelper *helper)
             g_critical ("Failed to connect to the notification daemon.");
 
         /* add event filter */
-        XkbSelectEvents (GDK_DISPLAY (), XkbUseCoreKbd, XkbControlsNotifyMask, XkbControlsNotifyMask);
+        XkbSelectEvents (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), XkbUseCoreKbd, XkbControlsNotifyMask, XkbControlsNotifyMask);
 
         /* monitor all window events */
         gdk_window_add_filter (NULL, xfce_accessibility_helper_event_filter, helper);
@@ -175,7 +175,7 @@ xfce_accessibility_helper_set_xkb (XfceAccessibilityHelper *helper,
     gint       delay, interval, time_to_max;
     gint       max_speed, curve;
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
     /* allocate */
     xkb = XkbAllocKeyboard ();
@@ -197,7 +197,7 @@ xfce_accessibility_helper_set_xkb (XfceAccessibilityHelper *helper,
             SET_FLAG (mask, XkbMouseKeysAccelMask);
 
         /* load the xkb controls into the structure */
-        XkbGetControls (GDK_DISPLAY (), mask, xkb);
+        XkbGetControls (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), mask, xkb);
 
         /* AccessXKeys */
         if (HAS_FLAG (mask, XkbAccessXKeysMask))
@@ -348,7 +348,7 @@ xfce_accessibility_helper_set_xkb (XfceAccessibilityHelper *helper,
         }
 
         /* set the modified controls */
-        if (!XkbSetControls (GDK_DISPLAY (), mask, xkb))
+        if (!XkbSetControls (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), mask, xkb))
             g_message ("Setting the xkb controls failed");
 
         /* free the structure */
@@ -361,7 +361,7 @@ xfce_accessibility_helper_set_xkb (XfceAccessibilityHelper *helper,
         g_critical ("XkbAllocKeyboard() returned a null pointer");
     }
 
-    if (gdk_error_trap_pop () != 0)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
        g_critical ("Failed to set keyboard controls");
 }
 
@@ -480,6 +480,9 @@ xfce_accessibility_helper_notification_show (XfceAccessibilityHelper *helper,
 #else
         helper->notification = notify_notification_new (summary, body, "keyboard", NULL);
 #endif
+
+        /* don't log notification */
+        notify_notification_set_hint (helper->notification, "transient", g_variant_new_boolean (FALSE));
 
         /* close signal */
         g_signal_connect (G_OBJECT (helper->notification), "closed", G_CALLBACK (xfce_accessibility_helper_notification_closed), helper);

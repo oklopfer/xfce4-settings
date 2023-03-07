@@ -34,13 +34,17 @@
 #include <xfsettingsd/pointers-defines.h>
 #ifdef HAVE_XCURSOR
 #include <X11/Xcursor/Xcursor.h>
+
+#include <gio/gio.h>
 #endif /* !HAVE_XCURSOR */
 
 #ifdef HAVE_LIBINPUT
 #include "libinput-properties.h"
 #endif /* HAVE_LIBINPUT */
 
+#include <cairo-gobject.h>
 #include <gtk/gtk.h>
+#include <gtk/gtkx.h>
 #include <gdk/gdkx.h>
 
 #include <xfconf/xfconf.h>
@@ -74,7 +78,7 @@ static gint device_presence_event_type = 0;
 #endif
 
 /* option entries */
-static GdkNativeWindow opt_socket_id = 0;
+static gint opt_socket_id = 0;
 static gchar *opt_device_name = NULL;
 static gboolean opt_version = FALSE;
 static GOptionEntry option_entries[] =
@@ -86,6 +90,8 @@ static GOptionEntry option_entries[] =
 };
 
 #ifdef HAVE_XCURSOR
+static const gchar *gsettings_category_gnome_interface = "org.gnome.desktop.interface";
+
 /* icon names for the preview widget */
 static const gchar *preview_names[] = {
     "left_ptr",            "left_ptr_watch",    "watch",             "hand2",
@@ -130,6 +136,8 @@ typedef union
     Atom    a;
 } propdata_t;
 
+
+
 static gchar *
 mouse_settings_format_value_px (GtkScale *scale,
                                 gdouble   value)
@@ -164,9 +172,10 @@ mouse_settings_format_value_s (GtkScale *scale,
 
 
 #ifdef HAVE_XCURSOR
-static GdkPixbuf *
+static cairo_surface_t *
 mouse_settings_themes_pixbuf_from_filename (const gchar *filename,
-                                            guint        size)
+                                            guint        size,
+                                            gint         scale_factor)
 {
     XcursorImage *image;
     GdkPixbuf    *scaled, *pixbuf = NULL;
@@ -174,9 +183,10 @@ mouse_settings_themes_pixbuf_from_filename (const gchar *filename,
     guchar       *buffer, *p, tmp;
     gdouble       wratio, hratio;
     gint          dest_width, dest_height;
+    guint         full_size = size * scale_factor;
 
     /* load the image */
-    image = XcursorFilenameLoadImage (filename, size);
+    image = XcursorFilenameLoadImage (filename, full_size);
     if (G_LIKELY (image))
     {
         /* buffer size */
@@ -200,21 +210,21 @@ mouse_settings_themes_pixbuf_from_filename (const gchar *filename,
         pixbuf = gdk_pixbuf_new_from_data (buffer, GDK_COLORSPACE_RGB, TRUE,
                                            8, image->width, image->height,
                                            4 * image->width,
-                                           (GdkPixbufDestroyNotify) g_free, NULL);
+                                           (GdkPixbufDestroyNotify) (void (*)(void)) g_free, NULL);
 
         /* don't leak when creating the pixbuf failed */
         if (G_UNLIKELY (pixbuf == NULL))
             g_free (buffer);
 
         /* scale pixbuf if needed */
-        if (pixbuf && (image->height > size || image->width > size))
+        if (pixbuf && (image->height > full_size || image->width > full_size))
         {
             /* calculate the ratio */
-            wratio = (gdouble) image->width / (gdouble) size;
-            hratio = (gdouble) image->height / (gdouble) size;
+            wratio = (gdouble) image->width / (gdouble) full_size;
+            hratio = (gdouble) image->height / (gdouble) full_size;
 
             /* init */
-            dest_width = dest_height = size;
+            dest_width = dest_height = full_size;
 
             /* set dest size */
             if (hratio > wratio)
@@ -234,27 +244,37 @@ mouse_settings_themes_pixbuf_from_filename (const gchar *filename,
         XcursorImageDestroy (image);
     }
 
-    return pixbuf;
+    if (G_LIKELY (pixbuf != NULL))
+    {
+        cairo_surface_t *surface = gdk_cairo_surface_create_from_pixbuf (pixbuf, scale_factor, NULL);
+        g_object_unref (pixbuf);
+        return surface;
+    }
+    else
+    {
+        return NULL;
+    }
 }
 
 
 
-static GdkPixbuf *
-mouse_settings_themes_preview_icon (const gchar *path)
+static cairo_surface_t *
+mouse_settings_themes_preview_icon (const gchar *path,
+                                    gint         scale_factor)
 {
-    GdkPixbuf *pixbuf = NULL;
+    cairo_surface_t *surface= NULL;
     gchar     *filename;
 
     /* we only try the normal cursor, it is (most likely) always there */
     filename = g_build_filename (path, "left_ptr", NULL);
 
-    /* try to load the pixbuf */
-    pixbuf = mouse_settings_themes_pixbuf_from_filename (filename, PREVIEW_SIZE);
+    /* try to load the preview */
+    surface = mouse_settings_themes_pixbuf_from_filename (filename, PREVIEW_SIZE, scale_factor);
 
     /* cleanup */
     g_free (filename);
 
-    return pixbuf;
+    return surface;
 }
 
 
@@ -263,63 +283,54 @@ static void
 mouse_settings_themes_preview_image (const gchar *path,
                                      GtkImage    *image)
 {
-    GdkPixbuf *pixbuf;
-    GdkPixbuf *preview;
-    guint      i, position;
-    gchar     *filename;
-    gint       dest_x, dest_y;
+    cairo_surface_t *preview;
+    cairo_t         *cr;
+    guint            i, position;
+    gint             scale_factor;
 
     /* create an empty preview image */
-    preview = gdk_pixbuf_new (GDK_COLORSPACE_RGB, TRUE, 8,
-                              (PREVIEW_SIZE + PREVIEW_SPACING) * PREVIEW_COLUMNS - PREVIEW_SPACING,
-                              (PREVIEW_SIZE + PREVIEW_SPACING) * PREVIEW_ROWS - PREVIEW_SPACING);
+    scale_factor = gtk_widget_get_scale_factor (GTK_WIDGET (image));
+    preview = cairo_image_surface_create (CAIRO_FORMAT_ARGB32,
+                                          ((PREVIEW_SIZE + PREVIEW_SPACING) * PREVIEW_COLUMNS - PREVIEW_SPACING) * scale_factor,
+                                          ((PREVIEW_SIZE + PREVIEW_SPACING) * PREVIEW_ROWS - PREVIEW_SPACING) * scale_factor);
+    cairo_surface_set_device_scale (preview, scale_factor, scale_factor);
+    cr = cairo_create (preview);
 
-    if (G_LIKELY (preview))
+    for (i = 0, position = 0; i < G_N_ELEMENTS (preview_names); i++)
     {
-        /* make the pixbuf transparent */
-        gdk_pixbuf_fill (preview, 0x00000000);
+        /* create cursor filename and try to load the pixbuf */
+        gchar     *filename = g_build_filename (path, preview_names[i], NULL);
+        cairo_surface_t *surface = mouse_settings_themes_pixbuf_from_filename (filename, PREVIEW_SIZE, scale_factor);
 
-        for (i = 0, position = 0; i < G_N_ELEMENTS (preview_names); i++)
+        g_free (filename);
+
+        if (G_LIKELY (surface))
         {
-            /* create cursor filename and try to load the pixbuf */
-            filename = g_build_filename (path, preview_names[i], NULL);
-            pixbuf = mouse_settings_themes_pixbuf_from_filename (filename, PREVIEW_SIZE);
-            g_free (filename);
+            gint dest_x, dest_y;
 
-            if (G_LIKELY (pixbuf))
-            {
-                /* calculate the icon position */
-                dest_x = (position % PREVIEW_COLUMNS) * (PREVIEW_SIZE + PREVIEW_SPACING);
-                dest_y = (position / PREVIEW_COLUMNS) * (PREVIEW_SIZE + PREVIEW_SPACING);
+            cairo_save (cr);
 
-                /* render it in the preview */
-                gdk_pixbuf_scale (pixbuf, preview, dest_x, dest_y,
-                                  gdk_pixbuf_get_width (pixbuf),
-                                  gdk_pixbuf_get_height (pixbuf),
-                                  dest_x, dest_y,
-                                  1.00, 1.00, GDK_INTERP_BILINEAR);
+            /* calculate the icon position */
+            dest_x = (position % PREVIEW_COLUMNS) * (PREVIEW_SIZE + PREVIEW_SPACING);
+            dest_y = (position / PREVIEW_COLUMNS) * (PREVIEW_SIZE + PREVIEW_SPACING);
+            cairo_translate (cr, dest_x, dest_y);
 
+            cairo_set_source_surface (cr, surface, 0, 0);
+            cairo_paint (cr);
 
-                /* release the pixbuf */
-                g_object_unref (G_OBJECT (pixbuf));
+            cairo_restore (cr);
+            cairo_surface_destroy (surface);
 
-                /* break if we've added enough icons */
-                if (++position >= PREVIEW_ROWS * PREVIEW_COLUMNS)
-                    break;
-            }
+            /* break if we've added enough icons */
+            if (++position >= PREVIEW_ROWS * PREVIEW_COLUMNS)
+                break;
         }
-
-        /* set the image */
-        gtk_image_set_from_pixbuf (GTK_IMAGE (image), preview);
-
-        /* release the pixbuf */
-        g_object_unref (G_OBJECT (preview));
     }
-    else
-    {
-        /* clear the image */
-        gtk_image_clear (GTK_IMAGE (image));
-    }
+
+    cairo_destroy (cr);
+
+    gtk_image_set_from_surface (image, preview);
+    cairo_surface_destroy (preview);
 }
 
 
@@ -333,6 +344,7 @@ mouse_settings_themes_selection_changed (GtkTreeSelection *selection,
     gboolean      has_selection;
     gchar        *path, *name;
     GObject      *image;
+    g_autoptr(GSettings) gsettings = NULL;
 
     has_selection = gtk_tree_selection_get_selected (selection, &model, &iter);
     if (G_LIKELY (has_selection))
@@ -347,7 +359,16 @@ mouse_settings_themes_selection_changed (GtkTreeSelection *selection,
 
         /* write configuration (not during a lock) */
         if (locked == 0)
+        {
             xfconf_channel_set_string (xsettings_channel, "/Gtk/CursorThemeName", name);
+
+            /* Keep gsettings in sync */
+            gsettings = g_settings_new (gsettings_category_gnome_interface);
+            if (gsettings)
+            {
+                g_settings_set_string (gsettings, "cursor-theme", name);
+            }
+        }
 
         /* cleanup */
         g_free (path);
@@ -409,7 +430,6 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
     const gchar        *comment;
     GtkTreeIter         iter;
     gint                position = 0;
-    GdkPixbuf          *pixbuf;
     gchar              *active_theme;
     GtkTreePath        *active_path = NULL;
     GtkListStore       *store;
@@ -418,6 +438,7 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
     GObject            *treeview;
     GtkTreeSelection   *selection;
     gchar              *comment_escaped;
+    gint                scale_factor;
 
     /* get the cursor paths */
 #if XCURSOR_LIB_MAJOR == 1 && XCURSOR_LIB_MINOR < 1
@@ -432,8 +453,11 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
     /* get the active theme */
     active_theme = xfconf_channel_get_string (xsettings_channel, "/Gtk/CursorThemeName", "default");
 
+    treeview = gtk_builder_get_object (builder, "theme-treeview");
+    scale_factor = gtk_widget_get_scale_factor (GTK_WIDGET (treeview));
+
     /* create the store */
-    store = gtk_list_store_new (N_THEME_COLUMNS, GDK_TYPE_PIXBUF, G_TYPE_STRING,
+    store = gtk_list_store_new (N_THEME_COLUMNS, CAIRO_GOBJECT_TYPE_SURFACE, G_TYPE_STRING,
                                 G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 
     /* insert default */
@@ -475,15 +499,19 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
                     /* check if it looks like a cursor theme */
                     if (g_file_test (filename, G_FILE_TEST_IS_DIR))
                     {
-                        /* try to load a pixbuf */
-                        pixbuf = mouse_settings_themes_preview_icon (filename);
+                        cairo_surface_t *surface = mouse_settings_themes_preview_icon (filename, scale_factor);
 
                         /* insert in the store */
                         gtk_list_store_insert_with_values (store, &iter, position++,
-                                                           COLUMN_THEME_PIXBUF, pixbuf,
+                                                           COLUMN_THEME_PIXBUF, surface,
                                                            COLUMN_THEME_NAME, theme,
                                                            COLUMN_THEME_DISPLAY_NAME, theme,
                                                            COLUMN_THEME_PATH, filename, -1);
+
+                        if (G_LIKELY (surface != NULL))
+                        {
+                            cairo_surface_destroy (surface);
+                        }
 
                         /* check if this is the active theme, set the path */
                         if (strcmp (active_theme, theme) == 0)
@@ -491,10 +519,6 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
                             gtk_tree_path_free (active_path);
                             active_path = gtk_tree_model_get_path (GTK_TREE_MODEL (store), &iter);
                         }
-
-                        /* release pixbuf */
-                        if (G_LIKELY (pixbuf))
-                            g_object_unref (G_OBJECT (pixbuf));
 
                         /* check for a index.theme file for additional information */
                         index_file = g_build_filename (path, theme, "index.theme", NULL);
@@ -555,13 +579,12 @@ mouse_settings_themes_populate_store (GtkBuilder *builder)
     g_free (active_theme);
 
     /* set the treeview store */
-    treeview = gtk_builder_get_object (builder, "theme-treeview");
     gtk_tree_view_set_model (GTK_TREE_VIEW (treeview), GTK_TREE_MODEL (store));
     gtk_tree_view_set_tooltip_column (GTK_TREE_VIEW (treeview), COLUMN_THEME_COMMENT);
 
     /* setup the columns */
     renderer = gtk_cell_renderer_pixbuf_new ();
-    column = gtk_tree_view_column_new_with_attributes ("", renderer, "pixbuf", COLUMN_THEME_PIXBUF, NULL);
+    column = gtk_tree_view_column_new_with_attributes ("", renderer, "surface", COLUMN_THEME_PIXBUF, NULL);
     gtk_tree_view_append_column (GTK_TREE_VIEW (treeview), column);
 
     renderer = gtk_cell_renderer_text_new ();
@@ -610,11 +633,11 @@ mouse_settings_get_device_prop (Display     *xdisplay,
     prop = XInternAtom (xdisplay, prop_name, False);
     float_type = XInternAtom (xdisplay, "FLOAT", False);
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     rc = XGetDeviceProperty (xdisplay, device, prop, 0, 1, False,
                              type, &type_ret, &format, &n_items_ret,
                              &bytes_after, &data);
-    gdk_error_trap_pop ();
+    gdk_x11_display_error_trap_pop_ignored (gdk_display_get_default ());
     if (rc == Success && type_ret == type && n_items_ret >= n_items)
     {
         success = TRUE;
@@ -747,11 +770,12 @@ mouse_settings_device_get_int_property (XDevice *device,
     gint     val = -1;
     gint     res;
 
-    gdk_error_trap_push ();
-    res = XGetDeviceProperty (GDK_DISPLAY (), device, prop, 0, 1000, False,
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
+    res = XGetDeviceProperty (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()),
+                              device, prop, 0, 1000, False,
                               AnyPropertyType, &type, &format,
                               &n_items, &bytes_after, &data);
-    if (gdk_error_trap_pop () == 0 && res == Success)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0 && res == Success)
     {
         if (type == XA_INTEGER)
         {
@@ -797,9 +821,9 @@ mouse_settings_device_get_selected (GtkBuilder  *builder,
         if (device != NULL)
         {
             /* open the device */
-            gdk_error_trap_push ();
-            *device = XOpenDevice (GDK_DISPLAY (), xid);
-            if (gdk_error_trap_pop () != 0 || *device == NULL)
+            gdk_x11_display_error_trap_push (gdk_display_get_default ());
+            *device = XOpenDevice (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), xid);
+            if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || *device == NULL)
             {
                 g_critical ("Unable to open device %ld", xid);
                 *device = NULL;
@@ -840,7 +864,7 @@ mouse_settings_wacom_set_rotation (GtkComboBox *combobox,
             g_free (prop);
         }
 
-        XCloseDevice (GDK_DISPLAY (), device);
+        XCloseDevice (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), device);
     }
 
     g_free (name);
@@ -855,7 +879,7 @@ mouse_settings_wacom_set_mode (GtkComboBox *combobox,
                                GtkBuilder  *builder)
 {
     XDevice      *device;
-    Display      *xdisplay = GDK_DISPLAY ();
+    Display      *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     GtkTreeIter   iter;
     GtkTreeModel *model;
     gchar        *mode = NULL;
@@ -892,7 +916,7 @@ mouse_settings_wacom_set_mode (GtkComboBox *combobox,
 static void
 mouse_settings_synaptics_set_tap_to_click (GtkBuilder *builder)
 {
-    Display   *xdisplay = GDK_DISPLAY ();
+    Display   *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XDevice   *device;
     gchar     *name = NULL;
     Atom       tap_ation_prop;
@@ -912,12 +936,12 @@ mouse_settings_synaptics_set_tap_to_click (GtkBuilder *builder)
         object = gtk_builder_get_object (builder, "synaptics-tap-to-click");
         tap_to_click = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (object));
 
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         tap_ation_prop = XInternAtom (xdisplay, "Synaptics Tap Action", True);
         res = XGetDeviceProperty (xdisplay, device, tap_ation_prop, 0, 1000, False,
                                   AnyPropertyType, &type, &format,
                                   &n_items, &bytes_after, &data);
-        if (gdk_error_trap_pop () == 0
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0
             && res == Success)
         {
             if (type == XA_INTEGER
@@ -1121,15 +1145,16 @@ mouse_settings_synaptics_set_scroll_horiz (GtkWidget  *widget,
 
 #if defined(DEVICE_PROPERTIES) || defined (HAVE_LIBINPUT)
 static void
-mouse_settings_device_set_enabled (GtkToggleButton *button,
-                                   GtkBuilder      *builder)
+mouse_settings_device_set_enabled (GtkSwitch  *widget,
+                                   GParamSpec *pspec,
+                                   GtkBuilder *builder)
 {
     gchar    *name = NULL;
     gchar    *prop;
     gboolean  enabled;
     GObject  *object;
 
-    enabled = gtk_toggle_button_get_active (button);
+    enabled = gtk_switch_get_active (widget);
     object = gtk_builder_get_object (builder, "device-notebook");
     gtk_widget_set_sensitive (GTK_WIDGET (object), enabled);
 
@@ -1153,7 +1178,7 @@ static void
 mouse_settings_device_selection_changed (GtkBuilder *builder)
 {
     gint               nbuttons = 0;
-    Display           *xdisplay = GDK_DISPLAY ();
+    Display           *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XDevice           *device;
     XDeviceInfo       *device_info;
     XFeedbackState    *states, *pt;
@@ -1209,9 +1234,9 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
     /* get the selected item */
     if (mouse_settings_device_get_selected (builder, &device, NULL))
     {
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         device_info = XListInputDevices (xdisplay, &ndevices);
-        if (gdk_error_trap_pop () == 0 && device_info != NULL)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0 && device_info != NULL)
         {
             /* find mode and number of buttons */
             for (i = 0; i < ndevices; i++)
@@ -1247,9 +1272,9 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
             if (nbuttons > 0)
             {
                 buttonmap = g_new0 (guchar, nbuttons);
-                gdk_error_trap_push ();
+                gdk_x11_display_error_trap_push (gdk_display_get_default ());
                 XGetDeviceButtonMapping (xdisplay, device, buttonmap, nbuttons);
-                if (gdk_error_trap_pop () != 0)
+                if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
                     g_critical ("Failed to get button map");
 
                 /* figure out the position of the first and second/third button in the map */
@@ -1278,9 +1303,9 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
 #endif /* HAVE_LIBINPUT */
         {
             /* get the feedback states for this device */
-            gdk_error_trap_push ();
+            gdk_x11_display_error_trap_push (gdk_display_get_default ());
             states = XGetFeedbackControl (xdisplay, device, &nstates);
-            if (gdk_error_trap_pop () != 0 || states == NULL)
+            if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || states == NULL)
             {
                  g_critical ("Failed to get feedback states");
             }
@@ -1321,9 +1346,9 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
         wacom_rotation_prop = XInternAtom (xdisplay, "Wacom Rotation", True);
 
         /* check if this is a synaptics or wacom device */
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         props = XListDeviceProperties (xdisplay, device, &nprops);
-        if (gdk_error_trap_pop () == 0 && props != NULL)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0 && props != NULL)
         {
             for (i = 0; i < nprops; i++)
             {
@@ -1411,7 +1436,7 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
     object = gtk_builder_get_object (builder, "device-enabled");
 #ifdef DEVICE_PROPERTIES
     gtk_widget_set_sensitive (GTK_WIDGET (object), is_enabled != -1);
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (object), is_enabled > 0);
+    gtk_switch_set_active (GTK_SWITCH (object), is_enabled > 0);
 
     object = gtk_builder_get_object (builder, "device-notebook");
     gtk_widget_set_sensitive (GTK_WIDGET (object), is_enabled == 1);
@@ -1648,9 +1673,9 @@ mouse_settings_device_populate_store (GtkBuilder *builder,
     }
 
     /* get all the registered devices */
-    gdk_error_trap_push ();
-    device_list = XListInputDevices (GDK_DISPLAY (), &ndevices);
-    if (gdk_error_trap_pop () != 0 || device_list == NULL)
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
+    device_list = XListInputDevices (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), &ndevices);
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device_list == NULL)
     {
         g_message ("No devices found");
         goto bailout;
@@ -1713,16 +1738,12 @@ mouse_settings_device_update_sliders (gpointer user_data)
     GtkBuilder *builder = GTK_BUILDER (user_data);
     GObject    *button;
 
-    GDK_THREADS_ENTER ();
-
     /* update */
     mouse_settings_device_selection_changed (builder);
 
     /* make the button sensitive again */
     button = gtk_builder_get_object (builder, "device-reset-feedback");
     gtk_widget_set_sensitive (GTK_WIDGET (button), TRUE);
-
-    GDK_THREADS_LEAVE ();
 
     return FALSE;
 }
@@ -1809,14 +1830,14 @@ mouse_settings_event_filter (GdkXEvent *xevent,
 static void
 mouse_settings_create_event_filter (GtkBuilder *builder)
 {
-    Display     *xdisplay = GDK_DISPLAY ();
+    Display     *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XEventClass  event_class;
 
     /* monitor device change events */
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     DevicePresence (xdisplay, device_presence_event_type, event_class);
     XSelectExtensionEvent (xdisplay, RootWindow (xdisplay, DefaultScreen (xdisplay)), &event_class, 1);
-    if (gdk_error_trap_pop () != 0)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
     {
         g_critical ("Failed to setup the device event filter");
         return;
@@ -1862,7 +1883,7 @@ main (gint argc, gchar **argv)
     xfce_textdomain (GETTEXT_PACKAGE, LOCALEDIR, "UTF-8");
 
     /* initialize Gtk+ */
-    if (!gtk_init_with_args (&argc, &argv, "", option_entries, GETTEXT_PACKAGE, &error))
+    if (!gtk_init_with_args (&argc, &argv, NULL, option_entries, GETTEXT_PACKAGE, &error))
     {
         if (G_LIKELY (error))
         {
@@ -1886,7 +1907,7 @@ main (gint argc, gchar **argv)
     if (G_UNLIKELY (opt_version))
     {
         g_print ("%s %s (Xfce %s)\n\n", G_LOG_DOMAIN, PACKAGE_VERSION, xfce_version_string ());
-        g_print ("%s\n", "Copyright (c) 2004-2011");
+        g_print ("%s\n", "Copyright (c) 2004-2023");
         g_print ("\t%s\n\n", _("The Xfce development team. All rights reserved."));
         g_print (_("Please report bugs to <%s>."), PACKAGE_BUGREPORT);
         g_print ("\n");
@@ -1905,7 +1926,7 @@ main (gint argc, gchar **argv)
     }
 
     /* check for Xi */
-    version = XGetExtensionVersion (GDK_DISPLAY (), INAME);
+    version = XGetExtensionVersion (GDK_DISPLAY_XDISPLAY(gdk_display_get_default()), INAME);
     if (version == NULL || ((long) version) == NoSuchExtension
         || !version->present)
     {
@@ -1946,7 +1967,7 @@ main (gint argc, gchar **argv)
             /* connect signals */
 #ifdef DEVICE_PROPERTIES
             object = gtk_builder_get_object (builder, "device-enabled");
-            g_signal_connect (G_OBJECT (object), "toggled",
+            g_signal_connect (G_OBJECT (object), "notify::active",
                               G_CALLBACK (mouse_settings_device_set_enabled), builder);
 #endif
 
@@ -2076,7 +2097,7 @@ main (gint argc, gchar **argv)
                 gtk_window_present (GTK_WINDOW (dialog));
 
                 /* To prevent the settings dialog to be saved in the session */
-                gdk_set_sm_client_id ("FAKE ID");
+                gdk_x11_set_sm_client_id ("FAKE ID");
 
                 gtk_main ();
 
@@ -2094,14 +2115,14 @@ main (gint argc, gchar **argv)
 
                 /* Get plug child widget */
                 plug_child = gtk_builder_get_object (builder, "plug-child");
-                gtk_widget_reparent (GTK_WIDGET (plug_child), plug);
+                xfce_widget_reparent (GTK_WIDGET (plug_child), plug);
                 gtk_widget_show (GTK_WIDGET (plug_child));
 
                 /* Unlock */
                 locked--;
 
                 /* To prevent the settings dialog to be saved in the session */
-                gdk_set_sm_client_id ("FAKE ID");
+                gdk_x11_set_sm_client_id ("FAKE ID");
 
                 /* Enter main loop */
                 gtk_main ();

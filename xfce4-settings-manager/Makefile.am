@@ -11,9 +11,7 @@ bin_PROGRAMS = \
 xfce4_settings_manager_SOURCES = \
 	main.c \
 	xfce-settings-manager-dialog.c \
-	xfce-settings-manager-dialog.h \
-	xfce-text-renderer.c \
-	xfce-text-renderer.h
+	xfce-settings-manager-dialog.h
 
 xfce4_settings_manager_CFLAGS = \
 	$(GTK_CFLAGS) \
@@ -22,7 +20,9 @@ xfce4_settings_manager_CFLAGS = \
 	$(GARCON_CFLAGS) \
 	$(XFCONF_CFLAGS) \
 	$(EXO_CFLAGS) \
-	$(PLATFORM_CFLAGS)
+	$(PLATFORM_CFLAGS) \
+    -DGTK_DISABLE_SINGLE_INCLUDES \
+    -DGSEAL_ENABLE
 
 xfce4_settings_manager_LDFLAGS = \
 	-no-undefined \

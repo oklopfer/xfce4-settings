@@ -1,16 +1,22 @@
 ACLOCAL_AMFLAGS = -I m4 ${ACLOCAL_FLAGS}
 
 SUBDIRS = \
+	common \
 	dialogs \
 	xfce4-settings-manager \
 	xfce4-settings-editor \
 	xfsettingsd \
-	po
+	po \
+	icons
+
+distuninstallcheck_listfiles = 						\
+	find . -type f -print | grep -v ./share/icons/hicolor/icon-theme.cache
 
 EXTRA_DIST = \
 	intltool-extract.in \
 	intltool-merge.in \
-	intltool-update.in
+	intltool-update.in \
+	README.md
 
 .PHONY: ChangeLog
 
@@ -24,4 +30,5 @@ dist-hook: ChangeLog
 DISTCLEANFILES = \
 	intltool-extract \
 	intltool-merge \
-	intltool-update
+	intltool-update \
+	./po/.intltool-merge-cache.lock

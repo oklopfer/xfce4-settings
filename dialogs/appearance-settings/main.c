@@ -32,17 +32,21 @@
 #endif
 
 #include <unistd.h>
+#include <fcntl.h>
+
 #include <glib.h>
 #include <glib/gstdio.h>
-#include <fcntl.h>
+#include <gio/gio.h>
+#include <cairo-gobject.h>
+#include <gdk/gdkx.h>
 #include <gtk/gtk.h>
+#include <gtk/gtkx.h>
 
 #include <libxfce4ui/libxfce4ui.h>
 #include <libxfce4util/libxfce4util.h>
 #include <xfconf/xfconf.h>
 
 #include "appearance-dialog_ui.h"
-#include "images.h"
 
 #define INCH_MM      25.4
 
@@ -53,23 +57,13 @@
 /* Increase this number if new gtk settings have been added */
 #define INITIALIZE_UINT (1)
 
-#define COLOR_SCHEME_SYMBOL ((gpointer) 1)
-#define GTK_RC_TOKEN_FG ((gpointer) 2)
-#define GTK_RC_TOKEN_BG ((gpointer) 3)
-#define GTK_RC_TOKEN_NORMAL ((gpointer) 4)
-#define GTK_RC_TOKEN_SELECTED ((gpointer) 5)
-
-gchar *gtkrc_get_color_scheme_for_theme (const gchar *gtkrc_filename);
-gboolean color_scheme_parse_colors (const gchar *scheme, GdkColor *colors);
-static GdkPixbuf *theme_create_preview (GdkColor *colors);
-
 enum
 {
     COLUMN_THEME_PREVIEW,
     COLUMN_THEME_NAME,
     COLUMN_THEME_DISPLAY_NAME,
     COLUMN_THEME_COMMENT,
-    COLUMN_THEME_NO_CACHE,
+    COLUMN_THEME_WARNING,
     N_THEME_COLUMNS
 };
 
@@ -87,12 +81,7 @@ enum {
 	NUM_SYMBOLIC_COLORS
 };
 
-/* String arrays with the settings in combo boxes */
-static const gchar* toolbar_styles_array[] =
-{
-    "icons", "text", "both", "both-horiz"
-};
-
+static const gchar *gsettings_category_gnome_interface = "org.gnome.desktop.interface";
 static const gchar* xft_hint_styles_array[] =
 {
     "hintnone", "hintslight", "hintmedium", "hintfull"
@@ -109,7 +98,7 @@ static const GtkTargetEntry theme_drop_targets[] =
 };
 
 /* Option entries */
-static GdkNativeWindow opt_socket_id = 0;
+static gint opt_socket_id = 0;
 static gboolean opt_version = FALSE;
 static GOptionEntry option_entries[] =
 {
@@ -127,6 +116,8 @@ typedef struct
     GtkTreeView *tree_view;
 } preview_data;
 
+
+static void install_theme (GtkWidget *widget, gchar **uris, GtkBuilder *builder);
 
 static preview_data *
 preview_data_new (GtkListStore *list_store,
@@ -169,6 +160,7 @@ compute_xsettings_dpi (GtkWidget *widget)
     int width, height;
     int dpi;
 
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     screen = gtk_widget_get_screen (widget);
     width_mm = gdk_screen_get_width_mm (screen);
     height_mm = gdk_screen_get_height_mm (screen);
@@ -181,317 +173,18 @@ compute_xsettings_dpi (GtkWidget *widget)
         dpi = MIN (INCH_MM * width  / width_mm,
                    INCH_MM * height / height_mm);
     }
+G_GNUC_END_IGNORE_DEPRECATIONS
 
     return dpi;
 }
 
-/* Try to retrieve the color scheme and alternatively parse the colors from the gtkrc */
-gchar *
-gtkrc_get_color_scheme_for_theme (const gchar *gtkrc_filename)
-{
-    gint file = -1;
-    GString *result_string = g_string_new("");
-    GString *fallback_string = g_string_new("");
-    GString *tmp_string = g_string_new("");
-    gchar *result = NULL;
-    gboolean bg_normal = FALSE;
-    gboolean bg_selected = FALSE;
-    gboolean fg_normal = FALSE;
-    GSList *files = NULL;
-    GSList *read_files = NULL;
-    GTokenType token;
-    GScanner *scanner = gtk_rc_scanner_new ();
-
-    g_return_val_if_fail (gtkrc_filename != NULL, "");
-
-    g_scanner_scope_add_symbol (scanner, 0, "gtk_color_scheme", COLOR_SCHEME_SYMBOL);
-    g_scanner_scope_add_symbol (scanner, 0, "gtk-color-scheme", COLOR_SCHEME_SYMBOL);
-    g_scanner_scope_add_symbol (scanner, 0, "fg", GTK_RC_TOKEN_FG);
-    g_scanner_scope_add_symbol (scanner, 0, "bg", GTK_RC_TOKEN_BG);
-    g_scanner_scope_add_symbol (scanner, 0, "NORMAL", GTK_RC_TOKEN_NORMAL);
-    g_scanner_scope_add_symbol (scanner, 0, "SELECTED", GTK_RC_TOKEN_SELECTED);
-
-    files = g_slist_prepend (files, g_strdup (gtkrc_filename));
-    while (files != NULL)
-    {
-        gchar *filename = files->data;
-        files = g_slist_delete_link (files, files);
-
-        if (filename == NULL)
-            continue;
-
-        if (g_slist_find_custom (read_files, filename, (GCompareFunc) strcmp))
-        {
-            g_warning ("Recursion in the gtkrc detected!");
-            g_free (filename);
-            continue; /* skip this file since we've done it before... */
-        }
-
-        read_files = g_slist_prepend (read_files, filename);
-
-        file = g_open (filename, O_RDONLY);
-        if (file == -1)
-            g_warning ("Could not open file \"%s\"", filename);
-        else
-        {
-            g_scanner_input_file (scanner, file);
-            while ((token = g_scanner_get_next_token (scanner)) != G_TOKEN_EOF)
-            {
-                /* Scan the gtkrc file for the gtk-color-scheme */
-                if (GINT_TO_POINTER (token) == COLOR_SCHEME_SYMBOL)
-                {
-                    if (g_scanner_get_next_token (scanner) == '=')
-                    {
-                        token = g_scanner_get_next_token (scanner);
-                        if (token == G_TOKEN_STRING)
-                        {
-                            g_string_append_printf(result_string, "\n%s", scanner->value.v_string);
-                        }
-                        bg_normal = g_strstr_len(result_string->str, -1, "bg_color") != NULL;
-                        bg_selected = g_strstr_len(result_string->str, -1, "selected_bg_color") != NULL;
-                        fg_normal = g_strstr_len(result_string->str, -1, "fg_color") != NULL;
-                    }
-                }
-                /* Scan the gtkrc file for first occurences of bg[NORMAL], bg[SELECTED] and fg[NORMAL] in case
-                 * it doesn't provide a gtk-color-scheme */
-                if (result_string->len == 0)
-                {
-                    if (GINT_TO_POINTER (token) == GTK_RC_TOKEN_BG)
-                    {
-                        if (g_scanner_get_next_token (scanner) == G_TOKEN_LEFT_BRACE)
-                        {
-                            /* bg[SELECTED] */
-                            if (GINT_TO_POINTER (token = g_scanner_get_next_token (scanner)) == GTK_RC_TOKEN_SELECTED
-                                && g_scanner_get_next_token (scanner) == G_TOKEN_RIGHT_BRACE
-                                && g_scanner_get_next_token (scanner) == '=')
-                            {
-                                token = g_scanner_get_next_token (scanner);
-                                /* Parse colors in hex #rrggbb format */
-                                if (token == G_TOKEN_STRING)
-                                {
-                                    if (!g_strrstr (fallback_string->str, "selected_bg_color"))
-                                    {
-                                        g_string_append_printf(fallback_string, "\nselected_bg_color:%s", scanner->value.v_string);
-                                        bg_selected = TRUE;
-                                    }
-                                }
-                                /* Parse colors in { r, g, b } format */
-                                else if (token == G_TOKEN_LEFT_CURLY)
-                                {
-                                    if (!g_strrstr (fallback_string->str, "selected_bg_color"))
-                                    {
-                                        g_string_erase(tmp_string, 0, -1);
-                                        while (token != G_TOKEN_RIGHT_CURLY)
-                                        {
-                                            token = g_scanner_get_next_token (scanner);
-                                            if (token == G_TOKEN_FLOAT)
-                                                g_string_append_printf(tmp_string, "%02x", (uint) (scanner->value.v_float*255));
-                                        }
-                                        g_string_append_printf(fallback_string, "\nselected_bg_color:#%s", tmp_string->str);
-                                        bg_selected = TRUE;
-                                    }
-                                }
-                            }
-                            /* bg[NORMAL] */
-                            else if (GINT_TO_POINTER (token) == GTK_RC_TOKEN_NORMAL
-                                     && g_scanner_get_next_token (scanner) == G_TOKEN_RIGHT_BRACE
-                                     && g_scanner_get_next_token (scanner) == '=')
-                            {
-                                token = g_scanner_get_next_token (scanner);
-                                /* Parse colors in hex #rrggbb format */
-                                if (token == G_TOKEN_STRING)
-                                {
-                                    if (!g_strrstr (fallback_string->str, "bg_color"))
-                                    {
-                                        g_string_append_printf(fallback_string, "\nbg_color:%s", scanner->value.v_string);
-                                        bg_normal = TRUE;
-                                    }
-                                }
-                                /* Parse colors in { r, g, b } format */
-                                else if (token == G_TOKEN_LEFT_CURLY)
-                                {
-                                    if (!g_strrstr (fallback_string->str, "bg_color"))
-                                    {
-                                        g_string_erase(tmp_string, 0, -1);
-                                        while (token != G_TOKEN_RIGHT_CURLY)
-                                        {
-                                            token = g_scanner_get_next_token (scanner);
-                                            if (token == G_TOKEN_FLOAT)
-                                                g_string_append_printf(tmp_string, "%02x", (uint) (scanner->value.v_float*255));
-                                        }
-                                        g_string_append_printf(fallback_string, "\nbg_color:#%s", tmp_string->str);
-                                        bg_normal = TRUE;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else if (GINT_TO_POINTER (token) == GTK_RC_TOKEN_FG)
-                    {
-                        /* fg[NORMAL] */
-                        if (g_scanner_get_next_token (scanner) == G_TOKEN_LEFT_BRACE
-                            && GINT_TO_POINTER (token = g_scanner_get_next_token (scanner)) == GTK_RC_TOKEN_NORMAL
-                                && g_scanner_get_next_token (scanner) == G_TOKEN_RIGHT_BRACE
-                                && g_scanner_get_next_token (scanner) == '=')
-                        {
-                            token = g_scanner_get_next_token (scanner);
-                            /* Parse colors in hex #rrggbb format */
-                            if (token == G_TOKEN_STRING)
-                            {
-                                if (!g_strrstr (fallback_string->str, "fg_color"))
-                                {
-                                    g_string_append_printf(fallback_string, "\nfg_color:%s", scanner->value.v_string);
-                                    fg_normal = TRUE;
-                                }
-                            }
-                            /* Parse colors in { r, g, b } format */
-                            else if (token == G_TOKEN_LEFT_CURLY)
-                            {
-                                if (!g_strrstr (fallback_string->str, "fg_color"))
-                                {
-                                    g_string_erase(tmp_string, 0, -1);
-                                    while (token != G_TOKEN_RIGHT_CURLY)
-                                    {
-                                        token = g_scanner_get_next_token (scanner);
-                                        if (token == G_TOKEN_FLOAT)
-                                            g_string_append_printf(tmp_string, "%02x", (uint) (scanner->value.v_float*255));
-                                    }
-                                    g_string_append_printf(fallback_string, "\nfg_color:#%s", tmp_string->str);
-                                    fg_normal = TRUE;
-                                }
-                            }
-                        }
-                    }
-                }
-                /* Check whether we can stop parsing because all colors have been retrieved somehow */
-                if (bg_normal && bg_selected && fg_normal)
-                    break;
-            }
-        close (file);
-        }
-    }
-
-    g_slist_foreach (read_files, (GFunc) g_free, NULL);
-    g_slist_free (read_files);
-
-    g_scanner_destroy (scanner);
-
-    /* Use the fallback colors parsed from the theme if gtk-color-scheme is not defined */
-    /*
-    if (!result)
-        result = fallback;
-    */
-    if (result_string->len == 0)
-        result = g_strdup(fallback_string->str);
-    else
-        result = g_strdup(result_string->str);
-
-    g_string_free(result_string, TRUE);
-    g_string_free(fallback_string, TRUE);
-    g_string_free(tmp_string, TRUE);
-
-    return result;
-}
-
-gboolean
-color_scheme_parse_colors (const gchar *scheme, GdkColor *colors)
-{
-    gchar **color_scheme_strings, **color_scheme_pair, *current_string;
-    gboolean found = FALSE;
-    gint i;
-
-    if (!scheme || !strcmp (scheme, ""))
-        return FALSE;
-
-    /* Initialise the array, fallback color is white */
-    for (i = 0; i < NUM_SYMBOLIC_COLORS; i++)
-        colors[i].red = colors[i].green = colors[i].blue = 65535.0;
-
-    /* The color scheme string consists of name:color pairs, separated by
-     * either semicolons or newlines, so first we split the string up by delimiter */
-    if (g_strrstr (scheme, ";"))
-        color_scheme_strings = g_strsplit (scheme, ";", 0);
-    else
-        color_scheme_strings = g_strsplit (scheme, "\n", 0);
-
-    /* Loop through the name:color pairs, and save the color if we recognise the name */
-    i = 0;
-    while ((current_string = color_scheme_strings[i++]))
-    {
-        color_scheme_pair = g_strsplit (current_string, ":", 0);
-
-        if (color_scheme_pair[0] != NULL && color_scheme_pair[1] != NULL)
-        {
-            g_strstrip (color_scheme_pair[0]);
-            g_strstrip (color_scheme_pair[1]);
-
-            if (!strcmp ("fg_color", color_scheme_pair[0]))
-            {
-              gdk_color_parse (color_scheme_pair[1], &colors[COLOR_FG]);
-              found = TRUE;
-            }
-            else if (!strcmp ("bg_color", color_scheme_pair[0]))
-            {
-              gdk_color_parse (color_scheme_pair[1], &colors[COLOR_BG]);
-              found = TRUE;
-            }
-            else if (!strcmp ("selected_bg_color", color_scheme_pair[0]))
-            {
-              gdk_color_parse (color_scheme_pair[1], &colors[COLOR_SELECTED_BG]);
-              found = TRUE;
-            }
-        }
-
-        g_strfreev (color_scheme_pair);
-    }
-
-    g_strfreev (color_scheme_strings);
-
-    return found;
-}
-
-static GdkPixbuf *
-theme_create_preview (GdkColor *colors)
-{
-    GdkPixbuf *theme_preview;
-    GdkPixmap *drawable;
-    GdkColormap *cmap = gdk_colormap_get_system ();
-    cairo_t *cr;
-    gint width = 44;
-    gint height = 22;
-
-    drawable = gdk_pixmap_new (NULL, width, height, 24);
-    cr = gdk_cairo_create (drawable);
-    cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
-
-    /* Draw three rectangles showcasing the background, foreground and selected background colors */
-    cairo_rectangle (cr, 0, 0, 16, 22);
-    cairo_set_source_rgb (cr, colors[COLOR_BG].red / 65535.0, colors[COLOR_BG].green / 65535.0, colors[COLOR_BG].blue / 65535.0);
-    cairo_fill (cr);
-
-    cairo_rectangle (cr, 15, 0, 30, 22);
-    cairo_set_source_rgb (cr, colors[COLOR_FG].red / 65535.0, colors[COLOR_FG].green / 65535.0, colors[COLOR_FG].blue / 65535.0);
-    cairo_fill (cr);
-
-    cairo_rectangle (cr, 29, 0, 42, 22);
-    cairo_set_source_rgb (cr, colors[COLOR_SELECTED_BG].red / 65535.0, colors[COLOR_SELECTED_BG].green / 65535.0, colors[COLOR_SELECTED_BG].blue / 65535.0);
-    cairo_fill (cr);
-
-    theme_preview = gdk_pixbuf_new (GDK_COLORSPACE_RGB, TRUE, 8, width, height);
-    gdk_pixbuf_get_from_drawable (theme_preview, drawable, cmap, 0, 0, 0, 0, width, height);
-
-    g_object_unref (drawable);
-    cairo_destroy (cr);
-
-    return theme_preview;
-}
-
 static void
-cb_theme_tree_selection_changed (GtkTreeSelection *selection,
-                                 const gchar      *property)
+theme_selection_changed (GtkTreeSelection *selection,
+                         const gchar      *property)
 {
     GtkTreeModel *model;
     gboolean      has_selection;
+    gboolean      has_xfwm4;
     gchar        *name;
     GtkTreeIter   iter;
 
@@ -499,11 +192,26 @@ cb_theme_tree_selection_changed (GtkTreeSelection *selection,
     has_selection = gtk_tree_selection_get_selected (selection, &model, &iter);
     if (G_LIKELY (has_selection))
     {
-        /* Get the theme name */
-        gtk_tree_model_get (model, &iter, COLUMN_THEME_NAME, &name, -1);
+        has_xfwm4 = FALSE;
+
+        /* Get the theme name and whether there is a xfwm4 theme as well */
+        gtk_tree_model_get (model, &iter, COLUMN_THEME_NAME, &name, COLUMN_THEME_WARNING, &has_xfwm4, -1);
 
         /* Store the new theme */
         xfconf_channel_set_string (xsettings_channel, property, name);
+
+        /* Set the matching xfwm4 theme if the selected theme is not an icon theme,
+         * the xfconf setting is on, and a matching theme is available */
+        if (xfconf_channel_get_bool (xsettings_channel, "/Xfce/SyncThemes", FALSE) == TRUE
+            && strcmp (property, "/Net/ThemeName") == 0)
+        {
+            if (!has_xfwm4)
+                xfconf_channel_set_string (xfconf_channel_get ("xfwm4"), "/general/theme", name);
+
+            /* Use the default theme if Adwaita is selected */
+            else if (strcmp (name, "Adwaita") == 0 || strcmp (name, "Adwaita-dark") == 0)
+                xfconf_channel_set_string (xfconf_channel_get ("xfwm4"), "/general/theme", "Default");
+        }
 
         /* Cleanup */
         g_free (name);
@@ -511,29 +219,45 @@ cb_theme_tree_selection_changed (GtkTreeSelection *selection,
 }
 
 static void
-cb_icon_theme_tree_selection_changed (GtkTreeSelection *selection)
+cb_icon_theme_selection_changed (GtkTreeSelection *selection)
 {
     /* Set the new icon theme */
-    cb_theme_tree_selection_changed (selection, "/Net/IconThemeName");
+    theme_selection_changed (selection, "/Net/IconThemeName");
 }
 
 static void
-cb_ui_theme_tree_selection_changed (GtkTreeSelection *selection)
+cb_ui_theme_selection_changed (GtkTreeSelection *selection)
 {
     /* Set the new UI theme */
-    cb_theme_tree_selection_changed (selection, "/Net/ThemeName");
+    theme_selection_changed (selection, "/Net/ThemeName");
 }
 
 static void
-cb_toolbar_style_combo_changed (GtkComboBox *combo)
+cb_xfwm4_sync_label_link_activated (GtkLabel *label)
+{
+    gchar  *command;
+    GError *error = NULL;
+
+    command = g_find_program_in_path ("xfwm4-settings");
+    if (command != NULL && !g_spawn_command_line_async (command, &error))
+    {
+         xfce_dialog_show_error (NULL, error, _("Failed to display Xfwm4 Settings"));
+         g_error_free (error);
+    }
+
+    g_free (command);
+}
+
+static void
+cb_window_scaling_factor_combo_changed (GtkComboBox *combo)
 {
     gint active;
 
     /* Get active item, prevent number outside the array (stay within zero-index) */
-    active = CLAMP (gtk_combo_box_get_active (combo), 0, (gint) G_N_ELEMENTS (toolbar_styles_array)-1);
+    active = CLAMP (gtk_combo_box_get_active (combo) + 1, 1, 2);
 
     /* Save setting */
-    xfconf_channel_set_string (xsettings_channel, "/Gtk/ToolbarStyle", toolbar_styles_array[active]);
+    xfconf_channel_set_int (xsettings_channel, "/Gdk/WindowScalingFactor", active);
 }
 
 static void
@@ -561,6 +285,9 @@ cb_hinting_style_combo_changed (GtkComboBox *combo)
 
     /* Save setting */
     xfconf_channel_set_string (xsettings_channel, "/Xft/HintStyle", xft_hint_styles_array[active]);
+
+    /* Also update /Xft/Hinting to match */
+    xfconf_channel_set_int (xsettings_channel, "/Xft/Hinting", active > 0 ? 1 : 0);
 }
 
 static void
@@ -615,7 +342,7 @@ cb_custom_dpi_spin_button_changed (GtkSpinButton   *custom_dpi_spin,
 {
     gint dpi = gtk_spin_button_get_value_as_int (custom_dpi_spin);
 
-    if (GTK_WIDGET_IS_SENSITIVE (custom_dpi_spin) && gtk_toggle_button_get_active (custom_dpi_toggle))
+    if (gtk_widget_is_sensitive (GTK_WIDGET(custom_dpi_spin)) && gtk_toggle_button_get_active (custom_dpi_toggle))
     {
         /* Custom DPI is turned on and the spin button has changed, so remember the value */
         xfconf_channel_set_int (xsettings_channel, "/Xfce/LastCustomDPI", dpi);
@@ -638,8 +365,9 @@ cb_enable_event_sounds_check_button_toggled (GtkToggleButton *toggle, GtkWidget 
 #endif
 
 static gboolean
-appearance_settings_load_icon_themes (preview_data *pd)
+appearance_settings_load_icon_themes (gpointer user_data)
 {
+    preview_data *pd = user_data;
     GtkListStore *list_store;
     GtkTreeView  *tree_view;
     GDir         *dir;
@@ -662,15 +390,18 @@ appearance_settings_load_icon_themes (preview_data *pd)
     gboolean      has_cache;
     gchar        *cache_tooltip;
     GtkIconTheme *icon_theme;
-    GdkPixbuf    *preview;
+    cairo_surface_t *preview;
+    cairo_t      *cr;
     GdkPixbuf    *icon;
     gchar*        preview_icons[4] = { "folder", "go-down", "audio-volume-high", "web-browser" };
     int           coords[4][2] = { { 4, 4 }, { 24, 4 }, { 4, 24 }, { 24, 24 } };
+    gint          scale_factor;
 
     g_return_val_if_fail (pd != NULL, FALSE);
 
     list_store = pd->list_store;
     tree_view = pd->tree_view;
+    scale_factor = gtk_widget_get_scale_factor (GTK_WIDGET (tree_view));
 
     /* Determine current theme */
     active_theme_name = xfconf_channel_get_string (xsettings_channel, "/Net/IconThemeName", "Rodent");
@@ -713,8 +444,10 @@ appearance_settings_load_icon_themes (preview_data *pd)
                     check_list = g_slist_prepend (check_list, g_strdup (file));
 
                     /* Create the icon-theme preview */
-                    preview = gdk_pixbuf_new (GDK_COLORSPACE_RGB, TRUE, 8, 44, 44);
-                    gdk_pixbuf_fill (preview, 0x00);
+                    preview = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 44 * scale_factor, 44 * scale_factor);
+                    cairo_surface_set_device_scale (preview, scale_factor, scale_factor);
+                    cr = cairo_create (preview);
+
                     icon_theme = gtk_icon_theme_new ();
                     gtk_icon_theme_set_custom_theme (icon_theme, file);
 
@@ -722,16 +455,26 @@ appearance_settings_load_icon_themes (preview_data *pd)
                     {
                         icon = NULL;
                         if (gtk_icon_theme_has_icon (icon_theme, preview_icons[p]))
-                            icon = gtk_icon_theme_load_icon (icon_theme, preview_icons[p], 16, 0, NULL);
+                            icon = gtk_icon_theme_load_icon_for_scale (icon_theme, preview_icons[p], 16, scale_factor, GTK_ICON_LOOKUP_FORCE_SIZE, NULL);
                         else if (gtk_icon_theme_has_icon (icon_theme, "image-missing"))
-                            icon = gtk_icon_theme_load_icon (icon_theme, "image-missing", 16, 0, NULL);
+                            icon = gtk_icon_theme_load_icon_for_scale (icon_theme, "image-missing", 16, scale_factor, GTK_ICON_LOOKUP_FORCE_SIZE, NULL);
 
                         if (icon)
                         {
-                            gdk_pixbuf_copy_area (icon, 0, 0, 16, 16, preview, coords[p][0], coords[p][1]);
+                            cairo_save (cr);
+
+                            cairo_translate (cr, coords[p][0], coords[p][1]);
+                            cairo_scale (cr, 1.0 / scale_factor, 1.0 / scale_factor);
+
+                            gdk_cairo_set_source_pixbuf (cr, icon, 0, 0);
+                            cairo_paint (cr);
+
+                            cairo_restore (cr);
                             g_object_unref (icon);
                         }
                     }
+
+                    cairo_destroy (cr);
 
                     /* Get translated icon theme name and comment */
                     theme_name = xfce_rc_read_entry (index_file, "Name", file);
@@ -763,7 +506,7 @@ appearance_settings_load_icon_themes (preview_data *pd)
                                         COLUMN_THEME_PREVIEW, preview,
                                         COLUMN_THEME_NAME, file,
                                         COLUMN_THEME_DISPLAY_NAME, visible_name,
-                                        COLUMN_THEME_NO_CACHE, !has_cache,
+                                        COLUMN_THEME_WARNING, !has_cache,
                                         COLUMN_THEME_COMMENT, cache_tooltip,
                                         -1);
 
@@ -776,7 +519,8 @@ appearance_settings_load_icon_themes (preview_data *pd)
                         gtk_tree_path_free (tree_path);
                     }
 
-                    g_object_unref (preview);
+                    g_object_unref (icon_theme);
+                    cairo_surface_destroy (preview);
                 }
             }
 
@@ -801,7 +545,7 @@ appearance_settings_load_icon_themes (preview_data *pd)
     /* Free the check list */
     if (G_LIKELY (check_list))
     {
-        g_slist_foreach (check_list, (GFunc) g_free, NULL);
+        g_slist_foreach (check_list, (GFunc) (void (*)(void)) g_free, NULL);
         g_slist_free (check_list);
     }
 
@@ -809,8 +553,9 @@ appearance_settings_load_icon_themes (preview_data *pd)
 }
 
 static gboolean
-appearance_settings_load_ui_themes (preview_data *pd)
+appearance_settings_load_ui_themes (gpointer user_data)
 {
+    preview_data *pd = user_data;
     GtkListStore *list_store;
     GtkTreeView  *tree_view;
     GDir         *dir;
@@ -824,14 +569,16 @@ appearance_settings_load_ui_themes (preview_data *pd)
     const gchar  *theme_comment;
     gchar        *active_theme_name;
     gchar        *gtkrc_filename;
+    gchar        *gtkcss_filename;
+    gchar        *xfwm4_filename;
+    gchar        *notifyd_filename;
+    gchar        *theme_name_markup;
     gchar        *comment_escaped;
     gint          i;
     GSList       *check_list = NULL;
-    gchar        *color_scheme = NULL;
-    GdkPixbuf    *preview;
-    GdkColor      colors[NUM_SYMBOLIC_COLORS];
-
-    g_return_val_if_fail (pd != NULL, FALSE);
+    gboolean      has_gtk2;
+    gboolean      has_xfwm4;
+    gboolean      has_notifyd;
 
     list_store = pd->list_store;
     tree_view = pd->tree_view;
@@ -857,11 +604,14 @@ appearance_settings_load_ui_themes (preview_data *pd)
         /* Iterate over filenames in the directory */
         while ((file = g_dir_read_name (dir)) != NULL)
         {
-            /* Build the theme style filename */
+            /* Build the filenames for theme components */
             gtkrc_filename = g_build_filename (ui_theme_dirs[i], file, "gtk-2.0", "gtkrc", NULL);
+            gtkcss_filename = g_build_filename (ui_theme_dirs[i], file, "gtk-3.0", "gtk.css", NULL);
+            xfwm4_filename = g_build_filename (ui_theme_dirs[i], file, "xfwm4", "themerc", NULL);
+            notifyd_filename = g_build_filename (ui_theme_dirs[i], file, "xfce-notify-4.0", "gtk.css", NULL);
 
-            /* Check if the gtkrc file exists and the theme is not already in the list */
-            if (g_file_test (gtkrc_filename, G_FILE_TEST_EXISTS)
+            /* Check if the gtk.css file exists and the theme is not already in the list */
+            if (g_file_test (gtkcss_filename, G_FILE_TEST_EXISTS)
                 && g_slist_find_custom (check_list, file, (GCompareFunc) g_utf8_collate) == NULL)
             {
                 /* Insert the theme in the check list */
@@ -889,31 +639,41 @@ appearance_settings_load_ui_themes (preview_data *pd)
                     comment_escaped = NULL;
                 }
 
-                /* Retrieve the color values from the theme, parse them and create the palette preview pixbuf */
-                color_scheme = gtkrc_get_color_scheme_for_theme (gtkrc_filename);
-                if (color_scheme_parse_colors (color_scheme, colors))
-                    preview = theme_create_preview (colors);
-                /* If the color scheme parsing doesn't return anything useful, show a blank pixbuf */
-                else
-                {
-                    preview = gdk_pixbuf_new (GDK_COLORSPACE_RGB, TRUE, 8, 44, 22);
-                    gdk_pixbuf_fill (preview, 0x00);
-                }
-                g_free (color_scheme);
+                /* Check if the gtk2 gtkrc, xfwm4 themerc, etc. files exist */
+                has_gtk2 = FALSE;
+                has_xfwm4 = FALSE;
+                has_notifyd = FALSE;
+
+                if (g_file_test (gtkrc_filename, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))
+                    has_gtk2 = TRUE;
+                if (g_file_test (xfwm4_filename, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))
+                    has_xfwm4 = TRUE;
+                if (g_file_test (notifyd_filename, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))
+                    has_notifyd = TRUE;
+
+                /* Compose the final markup text */
+                theme_name_markup = g_strdup_printf ("<b>%s</b>\nGtk3", theme_name);
+
+                if (has_gtk2)
+                    theme_name_markup = g_strconcat (theme_name_markup, ", Gtk2", NULL);
+                if (has_xfwm4)
+                    theme_name_markup = g_strconcat (theme_name_markup, ", Xfwm4", NULL);
+                if (has_notifyd)
+                    theme_name_markup = g_strconcat (theme_name_markup, ", Xfce4-notifyd", NULL);
 
                 /* Append ui theme to the list store */
                 gtk_list_store_append (list_store, &iter);
                 gtk_list_store_set (list_store, &iter,
-                                    COLUMN_THEME_PREVIEW, preview,
                                     COLUMN_THEME_NAME, file,
-                                    COLUMN_THEME_DISPLAY_NAME, theme_name,
+                                    COLUMN_THEME_DISPLAY_NAME, theme_name_markup,
+                                    COLUMN_THEME_WARNING, !has_xfwm4,
                                     COLUMN_THEME_COMMENT, comment_escaped, -1);
 
                 /* Cleanup */
                 if (G_LIKELY (index_file != NULL))
                     xfce_rc_close (index_file);
                 g_free (comment_escaped);
-                g_object_unref (preview);
+                g_free (theme_name_markup);
 
                 /* Check if this is the active theme, if so, select it */
                 if (G_UNLIKELY (g_utf8_collate (file, active_theme_name) == 0))
@@ -928,8 +688,11 @@ appearance_settings_load_ui_themes (preview_data *pd)
                 g_free (index_filename);
             }
 
-            /* Free gtkrc filename */
+            /* Free filenames */
             g_free (gtkrc_filename);
+            g_free (gtkcss_filename);
+            g_free (xfwm4_filename);
+            g_free (notifyd_filename);
         }
 
         /* Close directory handle */
@@ -945,7 +708,7 @@ appearance_settings_load_ui_themes (preview_data *pd)
     /* Free the check list */
     if (G_LIKELY (check_list))
     {
-        g_slist_foreach (check_list, (GFunc) g_free, NULL);
+        g_slist_foreach (check_list, (GFunc) (void (*)(void)) g_free, NULL);
         g_slist_free (check_list);
     }
 
@@ -963,6 +726,7 @@ appearance_settings_dialog_channel_property_changed (XfconfChannel *channel,
     guint         i;
     gint          antialias, dpi, custom_dpi;
     GtkTreeModel *model;
+    g_autoptr(GSettings) gsettings = NULL;
 
     g_return_if_fail (property_name != NULL);
     g_return_if_fail (GTK_IS_BUILDER (builder));
@@ -981,19 +745,11 @@ appearance_settings_dialog_channel_property_changed (XfconfChannel *channel,
         }
         g_free (str);
     }
-    else if (strcmp (property_name, "/Gtk/ToolbarStyle") == 0)
+    else if (strcmp (property_name, "/Gdk/WindowScalingFactor") == 0)
     {
-        str = xfconf_channel_get_string (xsettings_channel, property_name, toolbar_styles_array[2]);
-        for (i = 0; i < G_N_ELEMENTS (toolbar_styles_array); i++)
-        {
-            if (strcmp (str, toolbar_styles_array[i]) == 0)
-            {
-                object = gtk_builder_get_object (builder, "gtk_toolbar_style_combo_box");
-                gtk_combo_box_set_active (GTK_COMBO_BOX (object), i);
-                break;
-            }
-        }
-        g_free (str);
+        i = xfconf_channel_get_int (xsettings_channel, property_name, 1);
+        object = gtk_builder_get_object (builder, "gdk_window_scaling_factor_combo_box");
+        gtk_combo_box_set_active (GTK_COMBO_BOX (object), i - 1);
     }
     else if (strcmp (property_name, "/Xft/HintStyle") == 0)
     {
@@ -1058,11 +814,9 @@ appearance_settings_dialog_channel_property_changed (XfconfChannel *channel,
     else if (strcmp (property_name, "/Net/ThemeName") == 0)
     {
         GtkTreeIter iter;
-        gboolean    reload;
 
         object = gtk_builder_get_object (builder, "gtk_theme_treeview");
         model = gtk_tree_view_get_model (GTK_TREE_VIEW (object));
-        reload = TRUE;
 
         if (gtk_tree_selection_get_selected (gtk_tree_view_get_selection (GTK_TREE_VIEW (object)),
                                              &model,
@@ -1075,23 +829,24 @@ appearance_settings_dialog_channel_property_changed (XfconfChannel *channel,
 
             new_name = xfconf_channel_get_string (channel, property_name, NULL);
 
-            reload = (strcmp (new_name, selected_name) != 0);
-
             g_free (selected_name);
             g_free (new_name);
         }
 
-        if (reload)
+        /* Keep gsettings in sync */
+        gsettings = g_settings_new (gsettings_category_gnome_interface);
+        if (gsettings)
         {
-            preview_data *pd;
+            str = xfconf_channel_get_string (channel, property_name, NULL);
+            g_settings_set_string (gsettings, "gtk-theme", str);
 
-            gtk_list_store_clear (GTK_LIST_STORE (model));
+            /* Also set the preferred color scheme (needed for GTK4) */
+            if (str != NULL && g_str_has_suffix (str, "-dark"))
+                g_settings_set_string (gsettings, "color-scheme", "prefer-dark");
+            else
+                g_settings_reset (gsettings, "color-scheme");
 
-            pd = preview_data_new (GTK_LIST_STORE (model), GTK_TREE_VIEW (object));
-            g_idle_add_full (G_PRIORITY_HIGH_IDLE,
-                             (GSourceFunc) appearance_settings_load_ui_themes,
-                             pd,
-                             (GDestroyNotify) preview_data_free);
+            g_free (str);
         }
     }
     else if (strcmp (property_name, "/Net/IconThemeName") == 0)
@@ -1128,10 +883,42 @@ appearance_settings_dialog_channel_property_changed (XfconfChannel *channel,
 
             gtk_list_store_clear (GTK_LIST_STORE (model));
             pd = preview_data_new (GTK_LIST_STORE (model), GTK_TREE_VIEW (object));
-            g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
-                             (GSourceFunc) appearance_settings_load_icon_themes,
-                             pd,
-                             (GDestroyNotify) preview_data_free);
+            if (pd)
+                g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
+                                 appearance_settings_load_icon_themes,
+                                 pd,
+                                 (GDestroyNotify) preview_data_free);
+        }
+
+        /* Keep gsettings in sync */
+        gsettings = g_settings_new (gsettings_category_gnome_interface);
+        if (gsettings)
+        {
+            str = xfconf_channel_get_string (channel, property_name, NULL);
+            g_settings_set_string (gsettings, "icon-theme", str);
+            g_free (str);
+        }
+    }
+    else if (strcmp (property_name, "/Gtk/FontName") == 0)
+    {
+        /* Keep gsettings in sync */
+        gsettings = g_settings_new (gsettings_category_gnome_interface);
+        if (gsettings)
+        {
+            str = xfconf_channel_get_string (channel, property_name, NULL);
+            g_settings_set_string (gsettings, "font-name", str);
+            g_free (str);
+        }
+    }
+    else if (strcmp (property_name, "/Gtk/MonospaceFontName") == 0)
+    {
+        /* Keep gsettings in sync */
+        gsettings = g_settings_new (gsettings_category_gnome_interface);
+        if (gsettings)
+        {
+            str = xfconf_channel_get_string (channel, property_name, NULL);
+            g_settings_set_string (gsettings, "monospace-font-name", str);
+            g_free (str);
         }
     }
 }
@@ -1147,6 +934,18 @@ cb_theme_uri_dropped (GtkWidget        *widget,
                       GtkBuilder       *builder)
 {
     gchar        **uris;
+
+    uris = gtk_selection_data_get_uris (data);
+
+    if (uris)
+        install_theme (widget, uris, builder);
+    else
+        return;
+}
+
+static void
+install_theme (GtkWidget *widget, gchar **uris, GtkBuilder *builder)
+{
     gchar         *argv[3];
     guint          i;
     GError        *error = NULL;
@@ -1159,10 +958,6 @@ cb_theme_uri_dropped (GtkWidget        *widget,
     GObject       *object;
     GtkTreeModel  *model;
     preview_data  *pd;
-
-    uris = gtk_selection_data_get_uris (data);
-    if (uris == NULL)
-        return;
 
     argv[0] = HELPERDIR G_DIR_SEPARATOR_S "appearance-install-theme";
     argv[2] = NULL;
@@ -1191,7 +986,7 @@ cb_theme_uri_dropped (GtkWidget        *widget,
             {
                 case 2:
                     g_set_error (&error, G_SPAWN_ERROR, 0,
-                        _("File is larger than %d MB, installation aborted"), 50);
+                        _("File is too large, installation aborted"));
                     break;
 
                 case 3:
@@ -1207,6 +1002,11 @@ cb_theme_uri_dropped (GtkWidget        *widget,
                 case 5:
                     g_set_error_literal (&error, G_SPAWN_ERROR, 0,
                         _("Unknown format, only archives and directories are supported"));
+                    break;
+
+                case 6:
+                    g_set_error_literal (&error, G_SPAWN_ERROR, 0,
+                        _("Not a valid theme package"));
                     break;
 
                 default:
@@ -1231,7 +1031,7 @@ cb_theme_uri_dropped (GtkWidget        *widget,
 
     g_strfreev (uris);
     gdk_window_set_cursor (gdkwindow, NULL);
-    gdk_cursor_unref (cursor);
+    g_object_unref (cursor);
 
     if (something_installed)
     {
@@ -1240,22 +1040,120 @@ cb_theme_uri_dropped (GtkWidget        *widget,
         model = gtk_tree_view_get_model (GTK_TREE_VIEW (object));
         gtk_list_store_clear (GTK_LIST_STORE (model));
         pd = preview_data_new (GTK_LIST_STORE (model), GTK_TREE_VIEW (object));
-        g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
-                         (GSourceFunc) appearance_settings_load_icon_themes,
-                         pd,
-                         (GDestroyNotify) preview_data_free);
+        if (pd)
+            g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
+                             appearance_settings_load_icon_themes,
+                             pd,
+                             (GDestroyNotify) preview_data_free);
 
         /* reload gtk theme treeview */
         object = gtk_builder_get_object (builder, "gtk_theme_treeview");
         model = gtk_tree_view_get_model (GTK_TREE_VIEW (object));
         gtk_list_store_clear (GTK_LIST_STORE (model));
-
         pd = preview_data_new (GTK_LIST_STORE (model), GTK_TREE_VIEW (object));
-        g_idle_add_full (G_PRIORITY_HIGH_IDLE,
-                         (GSourceFunc) appearance_settings_load_ui_themes,
-                         pd,
-                         (GDestroyNotify) preview_data_free);
+        if (pd)
+            g_idle_add_full (G_PRIORITY_HIGH_IDLE,
+                             appearance_settings_load_ui_themes,
+                             pd,
+                             (GDestroyNotify) preview_data_free);
     }
+}
+
+static void
+appearance_settings_install_theme_cb (GtkButton *widget, GtkBuilder *builder)
+{
+    GtkWidget *window;
+    GtkWidget *dialog;
+    GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_OPEN;
+    GtkFileFilter *filter;
+    gint res;
+    gchar *theme;
+    gchar *title;
+
+    window = gtk_widget_get_toplevel (GTK_WIDGET (widget));
+    g_object_get (G_OBJECT (widget), "name", &theme, NULL);
+    title = g_strdup_printf (_("Install %s theme"), theme);
+    dialog = gtk_file_chooser_dialog_new (title,
+                                          GTK_WINDOW (window),
+                                          action,
+                                          _("_Cancel"),
+                                          GTK_RESPONSE_CANCEL,
+                                          _("_Open"),
+                                          GTK_RESPONSE_ACCEPT,
+                                          NULL);
+    filter = gtk_file_filter_new ();
+    gtk_file_filter_add_pattern (filter, "*.tar*");
+    gtk_file_filter_add_pattern (filter, "*.zip");
+    gtk_file_chooser_set_filter (GTK_FILE_CHOOSER (dialog), filter);
+    gtk_file_chooser_set_select_multiple (GTK_FILE_CHOOSER (dialog), FALSE);
+
+    res = gtk_dialog_run (GTK_DIALOG (dialog));
+    if (res == GTK_RESPONSE_ACCEPT)
+    {
+        gchar *filename;
+        gchar **uris;
+        GtkFileChooser *chooser = GTK_FILE_CHOOSER (dialog);
+
+        uris = g_new0 (gchar *, 2);
+        filename = gtk_file_chooser_get_filename (chooser);
+        uris[0] = g_filename_to_uri (filename, NULL, NULL);
+        install_theme (window, uris, builder);
+        g_free (filename);
+    }
+
+    gtk_widget_destroy (dialog);
+    g_free (title);
+    g_free (theme);
+}
+
+static cairo_surface_t *
+appearance_settings_draw_subpixel_icon (gboolean is_rgb,
+                                        gboolean is_vertical,
+                                        gint     size,
+                                        gint     scale_factor)
+{
+    cairo_surface_t *surface;
+    cairo_t         *cr;
+    gint             color_width;
+    double           colors[3][3] = { { 0.0, }, };
+
+    surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, size * scale_factor, size * scale_factor);
+    cairo_surface_set_device_scale (surface, scale_factor, scale_factor);
+
+    cr = cairo_create (surface);
+    cairo_scale (cr, 1.0 / scale_factor, 1.0 / scale_factor);
+
+    if (is_rgb)
+    {
+        colors[0][0] = 1.0;  // red
+        colors[1][1] = 1.0;  // green
+        colors[2][2] = 1.0;  // blue
+    }
+    else
+    {
+        colors[0][2] = 1.0;  // blue
+        colors[1][1] = 1.0;  // green
+        colors[2][0] = 1.0;  // red
+    }
+
+    color_width = (size * scale_factor) / 3;
+
+    for (gsize i = 0; i < G_N_ELEMENTS (colors); ++i)
+    {
+        cairo_save (cr);
+        cairo_set_source_rgb (cr, colors[i][0], colors[i][1], colors[i][2]);
+        cairo_rectangle (cr,
+                         is_vertical ? 0 : color_width * i,
+                         is_vertical ? color_width * i : 0,
+                         is_vertical ? size * scale_factor : color_width,
+                         is_vertical ? color_width : size * scale_factor);
+        cairo_fill (cr);
+        cairo_restore (cr);
+    }
+
+    cairo_destroy (cr);
+
+    return surface;
 }
 
 static void
@@ -1264,19 +1162,26 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     GObject           *object, *object2;
     GtkListStore      *list_store;
     GtkCellRenderer   *renderer;
-    GdkPixbuf         *pixbuf;
+    cairo_surface_t   *surface;
     GtkTreeSelection  *selection;
     GtkTreeViewColumn *column;
     preview_data      *pd;
+    gchar             *path;
+    gint               menu_icon_size;
+    gint               scale_factor;
 
     /* Icon themes list */
-    object = gtk_builder_get_object (builder, "icon_theme_treeview");
+    object = gtk_builder_get_object (builder, "install_icon_theme");
+    g_object_set (object, "name", "icon", NULL);
+    g_signal_connect (G_OBJECT (object), "clicked", G_CALLBACK (appearance_settings_install_theme_cb), builder);
 
-    list_store = gtk_list_store_new (N_THEME_COLUMNS, GDK_TYPE_PIXBUF, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN);
+    object = gtk_builder_get_object (builder, "icon_theme_treeview");
+    scale_factor = gtk_widget_get_scale_factor (GTK_WIDGET (object));
+
+    list_store = gtk_list_store_new (N_THEME_COLUMNS, CAIRO_GOBJECT_TYPE_SURFACE, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN);
     gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (list_store), COLUMN_THEME_DISPLAY_NAME, GTK_SORT_ASCENDING);
     gtk_tree_view_set_model (GTK_TREE_VIEW (object), GTK_TREE_MODEL (list_store));
     gtk_tree_view_set_tooltip_column (GTK_TREE_VIEW (object), COLUMN_THEME_COMMENT);
-    gtk_tree_view_set_rules_hint (GTK_TREE_VIEW (object), TRUE);
 
     /* Single-column layout */
     column = gtk_tree_view_column_new ();
@@ -1284,7 +1189,7 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     /* Icon Previews */
     renderer = gtk_cell_renderer_pixbuf_new ();
     gtk_tree_view_column_pack_start (column, renderer, FALSE);
-    gtk_tree_view_column_set_attributes (column, renderer, "pixbuf", COLUMN_THEME_PREVIEW, NULL);
+    gtk_tree_view_column_set_attributes (column, renderer, "surface", COLUMN_THEME_PREVIEW, NULL);
     gtk_tree_view_append_column (GTK_TREE_VIEW (object), column);
 
     /* Theme Name and Description */
@@ -1296,20 +1201,22 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     /* Warning Icon */
     renderer = gtk_cell_renderer_pixbuf_new ();
     gtk_tree_view_column_pack_start (column, renderer, FALSE);
-    gtk_tree_view_column_set_attributes (column, renderer, "visible", COLUMN_THEME_NO_CACHE, NULL);
-    g_object_set (G_OBJECT (renderer), "icon-name", GTK_STOCK_DIALOG_WARNING, NULL);
+    gtk_tree_view_column_set_attributes (column, renderer, "visible", COLUMN_THEME_WARNING, NULL);
+    g_object_set (G_OBJECT (renderer), "icon-name", "dialog-warning", NULL);
 
     pd = preview_data_new (GTK_LIST_STORE (list_store), GTK_TREE_VIEW (object));
-    g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
-                     (GSourceFunc) appearance_settings_load_icon_themes,
-                     pd,
-                     (GDestroyNotify) preview_data_free);
+    if (pd)
+        g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
+                         appearance_settings_load_icon_themes,
+                         pd,
+                         (GDestroyNotify) preview_data_free);
 
     g_object_unref (G_OBJECT (list_store));
 
     selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (object));
     gtk_tree_selection_set_mode (selection, GTK_SELECTION_SINGLE);
-    g_signal_connect (G_OBJECT (selection), "changed", G_CALLBACK (cb_icon_theme_tree_selection_changed), NULL);
+    gtk_tree_view_set_activate_on_single_click (GTK_TREE_VIEW (object), TRUE);
+    g_signal_connect_swapped (G_OBJECT (object), "row-activated", G_CALLBACK (cb_icon_theme_selection_changed), selection);
 
     gtk_drag_dest_set (GTK_WIDGET (object), GTK_DEST_DEFAULT_ALL,
                        theme_drop_targets, G_N_ELEMENTS (theme_drop_targets),
@@ -1336,52 +1243,82 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     /* Theme Name and Description */
     renderer = gtk_cell_renderer_text_new ();
     gtk_tree_view_column_pack_start (column, renderer, TRUE);
-    gtk_tree_view_column_set_attributes (column, renderer, "text", COLUMN_THEME_DISPLAY_NAME, NULL);
+    gtk_tree_view_column_set_attributes (column, renderer, "markup", COLUMN_THEME_DISPLAY_NAME, NULL);
     g_object_set (G_OBJECT (renderer), "ellipsize", PANGO_ELLIPSIZE_END, NULL);
 
     pd = preview_data_new (list_store, GTK_TREE_VIEW (object));
-    g_idle_add_full (G_PRIORITY_HIGH_IDLE,
-                     (GSourceFunc) appearance_settings_load_ui_themes,
-                     pd,
-                     (GDestroyNotify) preview_data_free);
+    if (pd)
+        g_idle_add_full (G_PRIORITY_HIGH_IDLE,
+                         appearance_settings_load_ui_themes,
+                         pd,
+                         (GDestroyNotify) preview_data_free);
 
     g_object_unref (G_OBJECT (list_store));
 
     selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (object));
     gtk_tree_selection_set_mode (selection, GTK_SELECTION_SINGLE);
-    g_signal_connect (G_OBJECT (selection), "changed", G_CALLBACK (cb_ui_theme_tree_selection_changed), NULL);
+    gtk_tree_view_set_activate_on_single_click (GTK_TREE_VIEW (object), TRUE);
+    g_signal_connect_swapped (G_OBJECT (object), "row-activated", G_CALLBACK (cb_ui_theme_selection_changed), selection);
 
     gtk_drag_dest_set (GTK_WIDGET (object), GTK_DEST_DEFAULT_ALL,
                        theme_drop_targets, G_N_ELEMENTS (theme_drop_targets),
                        GDK_ACTION_COPY);
     g_signal_connect (G_OBJECT (object), "drag-data-received", G_CALLBACK (cb_theme_uri_dropped), builder);
+    object = gtk_builder_get_object (builder, "install_gtk_theme");
+    g_object_set (object, "name", "Gtk", NULL);
+    g_signal_connect (G_OBJECT (object), "clicked", G_CALLBACK (appearance_settings_install_theme_cb), builder);
+
+    /* Switch for xfwm4 theme matching, gets hidden if xfwm4 is not installed */
+    path = g_find_program_in_path ("xfwm4");
+    if (path != NULL)
+    {
+        object = gtk_builder_get_object (builder, "xfwm4_sync_switch");
+        xfconf_g_property_bind (xsettings_channel, "/Xfce/SyncThemes", G_TYPE_BOOLEAN, G_OBJECT (object), "state");
+
+        object = gtk_builder_get_object (builder, "xfwm4_sync_label");
+        g_signal_connect (G_OBJECT (object), "activate-link", G_CALLBACK (cb_xfwm4_sync_label_link_activated), NULL);
+    }
+    else
+    {
+        object = gtk_builder_get_object (builder, "xfwm4_sync");
+        gtk_widget_hide (GTK_WIDGET (object));
+    }
+    g_free (path);
 
     /* Subpixel (rgba) hinting Combo */
     object = gtk_builder_get_object (builder, "xft_rgba_store");
 
-    pixbuf = gdk_pixbuf_new_from_xpm_data (rgba_image_none_xpm);
-    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 0, 0, pixbuf, 1, _("None"), -1);
-    g_object_unref (G_OBJECT (pixbuf));
+    gtk_icon_size_lookup (GTK_ICON_SIZE_MENU, &menu_icon_size, &menu_icon_size);
 
-    pixbuf = gdk_pixbuf_new_from_xpm_data (rgba_image_rgb_xpm);
-    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 1, 0, pixbuf, 1, _("RGB"), -1);
-    g_object_unref (G_OBJECT (pixbuf));
+    surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, menu_icon_size * scale_factor, menu_icon_size * scale_factor);
+    cairo_surface_set_device_scale (surface, scale_factor, scale_factor);
+    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 0, 0, surface, 1, _("None"), -1);
+    cairo_surface_destroy (surface);
 
-    pixbuf = gdk_pixbuf_new_from_xpm_data (rgba_image_bgr_xpm);
-    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 2, 0, pixbuf, 1, _("BGR"), -1);
-    g_object_unref (G_OBJECT (pixbuf));
+    surface = appearance_settings_draw_subpixel_icon (TRUE, FALSE, menu_icon_size, scale_factor);
+    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 1, 0, surface, 1, _("RGB"), -1);
+    cairo_surface_destroy (surface);
 
-    pixbuf = gdk_pixbuf_new_from_xpm_data (rgba_image_vrgb_xpm);
-    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 3, 0, pixbuf, 1, _("Vertical RGB"), -1);
-    g_object_unref (G_OBJECT (pixbuf));
+    surface = appearance_settings_draw_subpixel_icon (FALSE, FALSE, menu_icon_size, scale_factor);
+    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 2, 0, surface, 1, _("BGR"), -1);
+    cairo_surface_destroy (surface);
 
-    pixbuf = gdk_pixbuf_new_from_xpm_data (rgba_image_vbgr_xpm);
-    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 4, 0, pixbuf, 1, _("Vertical BGR"), -1);
-    g_object_unref (G_OBJECT (pixbuf));
+    surface = appearance_settings_draw_subpixel_icon (TRUE, TRUE, menu_icon_size, scale_factor);
+    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 3, 0, surface, 1, _("Vertical RGB"), -1);
+    cairo_surface_destroy (surface);
+
+    surface = appearance_settings_draw_subpixel_icon (FALSE, TRUE, menu_icon_size, scale_factor);
+    gtk_list_store_insert_with_values (GTK_LIST_STORE (object), NULL, 4, 0, surface, 1, _("Vertical BGR"), -1);
+    cairo_surface_destroy (surface);
 
     object = gtk_builder_get_object (builder, "xft_rgba_combo_box");
     appearance_settings_dialog_channel_property_changed (xsettings_channel, "/Xft/RGBA", NULL, builder);
     g_signal_connect (G_OBJECT (object), "changed", G_CALLBACK (cb_rgba_style_combo_changed), NULL);
+
+    /* Enable buttons in native GTK dialog headers */
+    object = gtk_builder_get_object (builder, "gtk_dialog_button_header_check_button");
+    xfconf_g_property_bind (xsettings_channel, "/Gtk/DialogsUseHeader", G_TYPE_BOOLEAN,
+                            G_OBJECT (object), "active");
 
     /* Enable editable menu accelerators */
     object = gtk_builder_get_object (builder, "gtk_caneditaccels_check_button");
@@ -1403,10 +1340,10 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     xfconf_g_property_bind (xsettings_channel,  "/Gtk/FontName", G_TYPE_STRING,
                             G_OBJECT (object), "font-name");
 
-    /* Toolbar style */
-    object = gtk_builder_get_object (builder, "gtk_toolbar_style_combo_box");
-    appearance_settings_dialog_channel_property_changed (xsettings_channel, "/Gtk/ToolbarStyle", NULL, builder);
-    g_signal_connect (G_OBJECT (object), "changed", G_CALLBACK(cb_toolbar_style_combo_changed), NULL);
+    /* Monospace font name */
+    object = gtk_builder_get_object (builder, "gtk_monospace_fontname_button");
+    xfconf_g_property_bind (xsettings_channel,  "/Gtk/MonospaceFontName", G_TYPE_STRING,
+                            G_OBJECT (object), "font-name");
 
     /* Hinting style */
     object = gtk_builder_get_object (builder, "xft_hinting_style_combo_box");
@@ -1425,6 +1362,11 @@ appearance_settings_dialog_configure_widgets (GtkBuilder *builder)
     gtk_widget_set_sensitive (GTK_WIDGET (object2), gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (object)));
     g_signal_connect (G_OBJECT (object), "toggled", G_CALLBACK (cb_custom_dpi_check_button_toggled), object2);
     g_signal_connect (G_OBJECT (object2), "value-changed", G_CALLBACK (cb_custom_dpi_spin_button_changed), object);
+
+    /* Window scaling factor */
+    object = gtk_builder_get_object (builder, "gdk_window_scaling_factor_combo_box");
+    appearance_settings_dialog_channel_property_changed (xsettings_channel, "/Gdk/WindowScalingFactor", NULL, builder);
+    g_signal_connect (G_OBJECT (object), "changed", G_CALLBACK(cb_window_scaling_factor_combo_changed), NULL);
 
 #ifdef ENABLE_SOUND_SETTINGS
     /* Sounds */
@@ -1469,7 +1411,7 @@ main (gint argc, gchar **argv)
     xfce_textdomain (GETTEXT_PACKAGE, LOCALEDIR, "UTF-8");
 
     /* initialize Gtk+ */
-    if (!gtk_init_with_args (&argc, &argv, "", option_entries, GETTEXT_PACKAGE, &error))
+    if (!gtk_init_with_args (&argc, &argv, NULL, option_entries, GETTEXT_PACKAGE, &error))
     {
         if (G_LIKELY (error))
         {
@@ -1493,7 +1435,7 @@ main (gint argc, gchar **argv)
     if (G_UNLIKELY (opt_version))
     {
         g_print ("%s %s (Xfce %s)\n\n", G_LOG_DOMAIN, PACKAGE_VERSION, xfce_version_string ());
-        g_print ("%s\n", "Copyright (c) 2008-2011");
+        g_print ("%s\n", "Copyright (c) 2008-2023");
         g_print ("\t%s\n\n", _("The Xfce development team. All rights reserved."));
         g_print (_("Please report bugs to <%s>."), PACKAGE_BUGREPORT);
         g_print ("\n");
@@ -1540,7 +1482,7 @@ main (gint argc, gchar **argv)
                 gtk_window_present (GTK_WINDOW (dialog));
 
                 /* To prevent the settings dialog to be saved in the session */
-                gdk_set_sm_client_id ("FAKE ID");
+                gdk_x11_set_sm_client_id ("FAKE ID");
 
                 gtk_main ();
             }
@@ -1556,11 +1498,11 @@ main (gint argc, gchar **argv)
 
                 /* Get plug child widget */
                 plug_child = gtk_builder_get_object (builder, "plug-child");
-                gtk_widget_reparent (GTK_WIDGET (plug_child), plug);
+                xfce_widget_reparent (GTK_WIDGET (plug_child), plug);
                 gtk_widget_show (GTK_WIDGET (plug_child));
 
                 /* To prevent the settings dialog to be saved in the session */
-                gdk_set_sm_client_id ("FAKE ID");
+                gdk_x11_set_sm_client_id ("FAKE ID");
 
                 /* Enter main loop */
                 gtk_main ();

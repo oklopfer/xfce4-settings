@@ -39,15 +39,13 @@
 #include <gdk/gdkx.h>
 #include <xfconf/xfconf.h>
 #include <libxfce4util/libxfce4util.h>
-
-#include <dbus/dbus-glib.h>
+#include <locale.h>
 
 #include "debug.h"
 #include "pointers.h"
 #include "pointers-defines.h"
 
 #define MAX_DENOMINATOR (100.00)
-#define XFCONF_TYPE_G_VALUE_ARRAY (dbus_g_type_get_collection ("GPtrArray", G_TYPE_VALUE))
 
 #ifdef XI_PROP_ENABLED
 #define DEVICE_ENABLED XI_PROP_ENABLED
@@ -177,12 +175,12 @@ xfce_pointers_helper_init (XfcePointersHelper *helper)
         if (G_LIKELY (xdisplay != NULL))
         {
             /* monitor device changes */
-            gdk_error_trap_push ();
+            gdk_x11_display_error_trap_push (gdk_display_get_default ());
             DevicePresence (xdisplay, helper->device_presence_event_type, event_class);
             XSelectExtensionEvent (xdisplay, RootWindow (xdisplay, DefaultScreen (xdisplay)), &event_class, 1);
 
             /* add an event filter */
-            if (gdk_error_trap_pop () == 0)
+            if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0)
                 gdk_window_add_filter (NULL, xfce_pointers_helper_event_filter, helper);
             else
                 g_warning ("Failed to create device filter");
@@ -215,11 +213,11 @@ xfce_pointers_is_enabled (Display *xdisplay,
     gboolean enabled;
 
     prop = XInternAtom (xdisplay, DEVICE_ENABLED, False);
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     rc = XGetDeviceProperty (xdisplay, device, prop, 0, 1, False,
                              XA_INTEGER, &type, &format, &n_items,
                              &bytes_after, &data);
-    gdk_error_trap_pop ();
+    gdk_x11_display_error_trap_pop_ignored (gdk_display_get_default ());
     if (rc == Success)
     {
         enabled = (gboolean) *data;
@@ -242,11 +240,11 @@ xfce_pointers_is_libinput (Display *xdisplay,
     guchar  *data;
 
     prop = XInternAtom (xdisplay, LIBINPUT_PROP_LEFT_HANDED, False);
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     rc = XGetDeviceProperty (xdisplay, device, prop, 0, 1, False,
                              XA_INTEGER, &type, &format, &n_items,
                              &bytes_after, &data);
-    gdk_error_trap_pop ();
+    gdk_x11_display_error_trap_pop_ignored (gdk_display_get_default ());
     if (rc == Success)
     {
         XFree (data);
@@ -281,7 +279,7 @@ static void
 xfce_pointers_helper_syndaemon_check (XfcePointersHelper *helper)
 {
 #ifdef DEVICE_PROPERTIES
-    Display     *xdisplay = GDK_DISPLAY ();
+    Display     *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XDeviceInfo *device_list;
     XDevice     *device;
     gint         n, ndevices;
@@ -299,9 +297,9 @@ xfce_pointers_helper_syndaemon_check (XfcePointersHelper *helper)
     if (!xfconf_channel_get_bool (helper->channel, "/DisableTouchpadWhileTyping", FALSE))
         goto start_stop_daemon;
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     device_list = XListInputDevices (xdisplay, &ndevices);
-    if (gdk_error_trap_pop () != 0 || device_list == NULL)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device_list == NULL)
         goto start_stop_daemon;
 
     touchpad_type = XInternAtom (xdisplay, XI_TOUCHPAD, True);
@@ -313,18 +311,18 @@ xfce_pointers_helper_syndaemon_check (XfcePointersHelper *helper)
         if (device_list[n].type != touchpad_type)
             continue;
 
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         device = XOpenDevice (xdisplay, device_list[n].id);
-        if (gdk_error_trap_pop () != 0 || device == NULL)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device == NULL)
         {
             g_critical ("Unable to open device %s", device_list[n].name);
             break;
         }
 
         /* look for the Synaptics Off property */
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         props = XListDeviceProperties (xdisplay, device, &nprops);
-        if (gdk_error_trap_pop () == 0
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) == 0
             && props != NULL)
         {
             for (i = 0; !have_synaptics && i < nprops; i++)
@@ -351,6 +349,7 @@ xfce_pointers_helper_syndaemon_check (XfcePointersHelper *helper)
         disable_duration = xfconf_channel_get_double (helper->channel,
                                                       "/DisableTouchpadDuration",
                                                       2.0);
+        setlocale(LC_NUMERIC, "C"); /* syndaemon needs a dot for the float. Nothing localized! */
         g_snprintf (disable_duration_string, sizeof (disable_duration_string),
                     "%.1f", disable_duration);
 
@@ -475,9 +474,9 @@ xfce_pointers_helper_change_button_mapping (XDeviceInfo *device_info,
     /* allocate the button map */
     buttonmap = g_new0 (guchar, num_buttons);
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     XGetDeviceButtonMapping (xdisplay, device, buttonmap, num_buttons);
-    if (gdk_error_trap_pop () != 0)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
     {
         g_warning ("Failed to get button mapping");
         goto leave;
@@ -511,9 +510,9 @@ xfce_pointers_helper_change_button_mapping (XDeviceInfo *device_info,
     /* only set on changes */
     if (map_changed)
     {
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         XSetDeviceButtonMapping (xdisplay, device, buttonmap, num_buttons);
-        if (gdk_error_trap_pop () != 0)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
             g_warning ("Failed to set button mapping");
 
         /* don't put a hard time on ourselves and make debugging a lot better */
@@ -578,9 +577,9 @@ xfce_pointers_helper_change_feedback (XDeviceInfo *device_info,
     }
 #endif /* HAVE_LIBINPUT */
     /* get the feedback states for this device */
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     states = XGetFeedbackControl (xdisplay, device, &num_feedbacks);
-    if (gdk_error_trap_pop() != 0 || states == NULL)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || states == NULL)
     {
         g_critical ("Failed to get the feedback states of device %s",
                     device_info->name);
@@ -640,10 +639,10 @@ xfce_pointers_helper_change_feedback (XDeviceInfo *device_info,
         }
 
         /* update the feedback of the device */
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         XChangeFeedbackControl (xdisplay, device, mask,
                                 (XFeedbackControl *) &feedback);
-        if (gdk_error_trap_pop() != 0)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
         {
             g_warning ("Failed to set feedback states for device %s",
                        device_info->name);
@@ -687,9 +686,9 @@ xfce_pointers_helper_change_mode (XDeviceInfo  *device_info,
         return;
     }
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     XSetDeviceMode (xdisplay, device, mode);
-    if (gdk_error_trap_pop () != 0)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
         g_critical ("Failed to change the device mode");
 
     xfsettings_dbg (XFSD_DEBUG_POINTERS,
@@ -782,9 +781,9 @@ xfce_pointers_helper_change_property (XDeviceInfo  *device_info,
         return;
 #endif /* HAVE_LIBINPUT */
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     props = XListDeviceProperties (xdisplay, device, &n_props);
-    if (gdk_error_trap_pop () || props == NULL)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) || props == NULL)
         return;
 
     float_atom = XInternAtom (xdisplay, "FLOAT", False);
@@ -795,11 +794,11 @@ xfce_pointers_helper_change_property (XDeviceInfo  *device_info,
         if (props[n] != prop)
             continue;
 
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         rc = XGetDeviceProperty (xdisplay, device, prop, 0, 1000, False,
                                  AnyPropertyType, &type, &format,
                                  &n_items, &bytes_after, &data.c);
-        if (!gdk_error_trap_pop () && rc == Success)
+        if (!gdk_x11_display_error_trap_pop (gdk_display_get_default ()) && rc == Success)
         {
             if (n_items == 1
                 && (G_VALUE_HOLDS_INT (value)
@@ -809,7 +808,7 @@ xfce_pointers_helper_change_property (XDeviceInfo  *device_info,
                 /* only 1 items to set */
                 val = value;
             }
-            else if (G_VALUE_TYPE (value) == XFCONF_TYPE_G_VALUE_ARRAY)
+            else if (G_VALUE_TYPE (value) == G_TYPE_PTR_ARRAY)
             {
                 array = g_value_get_boxed (value);
                 if (array->len != n_items)
@@ -862,7 +861,9 @@ xfce_pointers_helper_change_property (XDeviceInfo  *device_info,
                          && type == float_atom
                          && format == 32)
                 {
-                    data.f[i] = (float) g_value_get_double (val);
+                    /* Xorg actually uses sizeof(long) bytes per element if format == 32 */
+                    /* See https://gitlab.freedesktop.org/xorg/app/xinput/-/blob/cef07c0c8280d7e7b82c3bcc62a1dfbe8cc43ff8/src/property.c#L80 */
+                    *(float*) &data.l[i] = (float) g_value_get_double (val);
                 }
                 else
                 {
@@ -877,11 +878,11 @@ xfce_pointers_helper_change_property (XDeviceInfo  *device_info,
 
             if (n_succeeds == n_items)
             {
-                gdk_error_trap_push ();
+                gdk_x11_display_error_trap_push (gdk_display_get_default ());
                 XChangeDeviceProperty (xdisplay, device, prop, type, format,
                                        PropModeReplace, data.c, n_items);
                 XSync (xdisplay, FALSE);
-                if (gdk_error_trap_pop ())
+                if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()))
                 {
                     g_critical ("Failed to set device property %s for %s",
                                 prop_name, device_info->name);
@@ -926,7 +927,7 @@ static void
 xfce_pointers_helper_restore_devices (XfcePointersHelper *helper,
                                       XID                *xid)
 {
-    Display         *xdisplay = GDK_DISPLAY ();
+    Display         *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XDeviceInfo     *device_list, *device_info;
     gint             n, ndevices;
     XDevice         *device;
@@ -940,11 +941,10 @@ xfce_pointers_helper_restore_devices (XfcePointersHelper *helper,
     GHashTable      *props;
     XfcePointerData  pointer_data;
 #endif
-    const gchar     *mode;
 
-    gdk_error_trap_push ();
+    gdk_x11_display_error_trap_push (gdk_display_get_default ());
     device_list = XListInputDevices (xdisplay, &ndevices);
-    if (gdk_error_trap_pop () != 0 || device_list == NULL)
+    if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device_list == NULL)
     {
         g_message ("No input devices found");
         return;
@@ -952,6 +952,8 @@ xfce_pointers_helper_restore_devices (XfcePointersHelper *helper,
 
     for (n = 0; n < ndevices; n++)
     {
+        gchar *mode;
+
         /* filter the pointer devices */
         device_info = &device_list[n];
         if (device_info->use != IsXExtensionPointer
@@ -963,9 +965,9 @@ xfce_pointers_helper_restore_devices (XfcePointersHelper *helper,
             continue;
 
         /* open the device */
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         device = XOpenDevice (xdisplay, device_info->id);
-        if (gdk_error_trap_pop () != 0 || device == NULL)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device == NULL)
         {
             g_critical ("Unable to open device %s", device_info->name);
             continue;
@@ -1005,7 +1007,11 @@ xfce_pointers_helper_restore_devices (XfcePointersHelper *helper,
         mode =  xfconf_channel_get_string  (helper->channel, prop, NULL);
 
         if (mode != NULL)
+        {
             xfce_pointers_helper_change_mode (device_info, device, xdisplay, mode);
+            g_free (mode);
+            mode = NULL;
+        }
 
 #ifdef DEVICE_PROPERTIES
         /* set device properties */
@@ -1040,7 +1046,7 @@ xfce_pointers_helper_channel_property_changed (XfconfChannel      *channel,
                                                const GValue       *value,
                                                XfcePointersHelper *helper)
 {
-    Display      *xdisplay = GDK_DISPLAY ();
+    Display      *xdisplay = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
     XDeviceInfo  *device_list, *device_info;
     XDevice      *device;
     gint          n, ndevices;
@@ -1063,9 +1069,9 @@ xfce_pointers_helper_channel_property_changed (XfconfChannel      *channel,
 
     if (names != NULL && g_strv_length (names) >= 2)
     {
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
         device_list = XListInputDevices (xdisplay, &ndevices);
-        if (gdk_error_trap_pop () != 0 || device_list == NULL)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device_list == NULL)
         {
             g_message ("No input devices found");
             return;
@@ -1084,9 +1090,9 @@ xfce_pointers_helper_channel_property_changed (XfconfChannel      *channel,
             if (strcmp (names[0], device_name) == 0)
             {
                 /* open the device */
-                gdk_error_trap_push ();
+                gdk_x11_display_error_trap_push (gdk_display_get_default ());
                 device = XOpenDevice (xdisplay, device_info->id);
-                if (gdk_error_trap_pop () != 0 || device == NULL)
+                if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0 || device == NULL)
                 {
                     g_critical ("Unable to open device %s", device_info->name);
                     continue;

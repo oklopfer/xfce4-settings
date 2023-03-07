@@ -36,8 +36,8 @@
 #endif
 
 #include <glib.h>
+#include <gio/gio.h>
 #include <gtk/gtk.h>
-#include <dbus/dbus.h>
 
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -48,6 +48,8 @@
 #include <xfconf/xfconf.h>
 #include <libxfce4util/libxfce4util.h>
 #include <libxfce4ui/libxfce4ui.h>
+
+#include <locale.h>
 
 #include "debug.h"
 #include "accessibility.h"
@@ -67,21 +69,113 @@
 #define XFSETTINGS_DBUS_NAME    "org.xfce.SettingsDaemon"
 #define XFSETTINGS_DESKTOP_FILE (SYSCONFIGDIR "/xdg/autostart/xfsettingsd.desktop")
 
-
-static XfceSMClient *sm_client = NULL;
+#define UNREF_GOBJECT(obj) \
+    if (obj) \
+    g_object_unref (G_OBJECT(obj))
 
 static gboolean opt_version = FALSE;
-static gboolean opt_no_daemon = FALSE;
+static gboolean opt_daemon = FALSE;
+static gboolean opt_disable_wm_check = FALSE;
 static gboolean opt_replace = FALSE;
+static guint owner_id;
+
+struct t_data_set
+{
+    XfceSMClient         *sm_client;
+    GObject              *pointer_helper;
+    GObject              *keyboards_helper;
+    GObject              *accessibility_helper;
+    GObject              *shortcuts_helper;
+    GObject              *keyboard_layout_helper;
+    GObject              *gtk_decorations_helper;
+    GObject              *xsettings_helper;
+    GObject              *clipboard_daemon;
+#ifdef HAVE_XRANDR
+    GObject              *displays_helper;
+#endif
+    GObject              *workspaces_helper;
+};
+
+
 static GOptionEntry option_entries[] =
 {
     { "version", 'V', 0, G_OPTION_ARG_NONE, &opt_version, N_("Version information"), NULL },
-    { "no-daemon", 0, 0, G_OPTION_ARG_NONE, &opt_no_daemon, N_("Do not fork to the background"), NULL },
+    { "daemon", 0, 0, G_OPTION_ARG_NONE, &opt_daemon, N_("Fork to the background"), NULL },
+    { "disable-wm-check", 'D', 0, G_OPTION_ARG_NONE, &opt_disable_wm_check, N_("Do not wait for a window manager on startup"), NULL },
     { "replace", 0, 0, G_OPTION_ARG_NONE, &opt_replace, N_("Replace running xsettings daemon (if any)"), NULL },
     { NULL }
 };
 
+static void
+on_name_lost (GDBusConnection *connection,
+              const gchar     *name,
+              gpointer         user_data)
+{
 
+    g_printerr (G_LOG_DOMAIN ": %s\n", "Another instance took over. Leaving...");
+    gtk_main_quit ();
+}
+
+static void
+on_name_acquired (GDBusConnection *connection,
+                  const gchar     *name,
+                  gpointer         user_data)
+{
+    GBusNameOwnerFlags         dbus_flags;
+    struct t_data_set         *s_data;
+    GError                    *error = NULL;
+
+    s_data = (struct t_data_set*) user_data;
+
+    /* launch settings manager */
+    s_data->xsettings_helper = g_object_new (XFCE_TYPE_XSETTINGS_HELPER, NULL);
+    xfce_xsettings_helper_register (XFCE_XSETTINGS_HELPER (s_data->xsettings_helper),
+                                    gdk_display_get_default (), opt_replace);
+
+    /* create the sub daemons */
+#ifdef HAVE_XRANDR
+    s_data->displays_helper = g_object_new (XFCE_TYPE_DISPLAYS_HELPER, NULL);
+#endif
+    s_data->pointer_helper = g_object_new (XFCE_TYPE_POINTERS_HELPER, NULL);
+    s_data->keyboards_helper = g_object_new (XFCE_TYPE_KEYBOARDS_HELPER, NULL);
+    s_data->accessibility_helper = g_object_new (XFCE_TYPE_ACCESSIBILITY_HELPER, NULL);
+    s_data->shortcuts_helper = g_object_new (XFCE_TYPE_KEYBOARD_SHORTCUTS_HELPER, NULL);
+    s_data->keyboard_layout_helper = g_object_new (XFCE_TYPE_KEYBOARD_LAYOUT_HELPER, NULL);
+#ifdef GDK_WINDOWING_X11
+    xfce_workspaces_helper_disable_wm_check (opt_disable_wm_check);
+#endif
+    s_data->workspaces_helper = g_object_new (XFCE_TYPE_WORKSPACES_HELPER, NULL);
+    s_data->gtk_decorations_helper = g_object_new (XFCE_TYPE_DECORATIONS_HELPER, NULL);
+
+    /* connect to session always, even if we quit below.  this way the
+     * session manager won't wait for us to time out. */
+    s_data->sm_client = xfce_sm_client_get ();
+    xfce_sm_client_set_restart_style (s_data->sm_client, XFCE_SM_CLIENT_RESTART_IMMEDIATELY);
+    xfce_sm_client_set_desktop_file (s_data->sm_client, XFSETTINGS_DESKTOP_FILE);
+    xfce_sm_client_set_priority (s_data->sm_client, 20);
+    g_signal_connect (G_OBJECT (s_data->sm_client), "quit", G_CALLBACK (gtk_main_quit), NULL);
+    if (!xfce_sm_client_connect (s_data->sm_client, &error) && error)
+    {
+        g_printerr ("Failed to connect to session manager: %s\n", error->message);
+        g_clear_error (&error);
+    }
+
+    if (g_getenv ("XFSETTINGSD_NO_CLIPBOARD") == NULL)
+    {
+        s_data->clipboard_daemon = g_object_new (GSD_TYPE_CLIPBOARD_MANAGER, NULL);
+        if (!gsd_clipboard_manager_start (GSD_CLIPBOARD_MANAGER (s_data->clipboard_daemon), opt_replace))
+        {
+            UNREF_GOBJECT (G_OBJECT (s_data->clipboard_daemon));
+            s_data->clipboard_daemon = NULL;
+
+            g_printerr (G_LOG_DOMAIN ": %s\n", "Another clipboard manager is already running.");
+        }
+    }
+
+    /* Update the name flags to allow replacement */
+    dbus_flags = G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT;
+    g_bus_own_name_on_connection (connection, XFSETTINGS_DBUS_NAME, dbus_flags, NULL, NULL, NULL, NULL );
+}
 
 static void
 signal_handler (gint signum,
@@ -90,39 +184,6 @@ signal_handler (gint signum,
     /* quit the main loop */
     gtk_main_quit ();
 }
-
-
-
-static DBusHandlerResult
-dbus_connection_filter_func (DBusConnection *connection,
-                             DBusMessage    *message,
-                             void           *user_data)
-{
-    gchar *name, *old, *new;
-
-    if (dbus_message_is_signal (message, DBUS_INTERFACE_DBUS, "NameOwnerChanged"))
-    {
-        /* double check if it is really org.xfce.SettingsDaemon
-         * being replaced, see bug 9273 */
-        if (dbus_message_get_args (message, NULL,
-                                   DBUS_TYPE_STRING, &name,
-                                   DBUS_TYPE_STRING, &old,
-                                   DBUS_TYPE_STRING, &new,
-                                   DBUS_TYPE_INVALID))
-        {
-            if (g_strcmp0 (name, XFSETTINGS_DBUS_NAME) == 0)
-            {
-                g_printerr (G_LOG_DOMAIN ": %s\n", "Another instance took over. Leaving...");
-                gtk_main_quit ();
-                return DBUS_HANDLER_RESULT_HANDLED;
-            }
-        }
-    }
-
-    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-}
-
-
 
 static gint
 daemonize (void)
@@ -155,23 +216,13 @@ main (gint argc, gchar **argv)
 {
     GError               *error = NULL;
     GOptionContext       *context;
-    GObject              *pointer_helper;
-    GObject              *keyboards_helper;
-    GObject              *accessibility_helper;
-    GObject              *shortcuts_helper;
-    GObject              *keyboard_layout_helper;
-    GObject              *gtk_decorations_helper;
-    GObject              *xsettings_helper;
-    GObject              *clipboard_daemon = NULL;
-#ifdef HAVE_XRANDR
-    GObject              *displays_helper;
-#endif
-    GObject              *workspaces_helper;
+    struct t_data_set     s_data;
     guint                 i;
     const gint            signums[] = { SIGQUIT, SIGTERM };
-    DBusConnection       *dbus_connection;
-    gint                  result;
-    guint                 dbus_flags;
+    GDBusConnection      *dbus_connection;
+    GBusNameOwnerFlags    dbus_flags;
+    gboolean              name_owned;
+    GVariant             *name_owned_variant;
 
     xfce_textdomain (GETTEXT_PACKAGE, LOCALEDIR, "UTF-8");
 
@@ -203,7 +254,7 @@ main (gint argc, gchar **argv)
     if (G_UNLIKELY (opt_version))
     {
         g_print ("%s %s (Xfce %s)\n\n", G_LOG_DOMAIN, PACKAGE_VERSION, xfce_version_string ());
-        g_print ("%s\n", "Copyright (c) 2008-2011");
+        g_print ("%s\n", "Copyright (c) 2008-2023");
         g_print ("\t%s\n\n", _("The Xfce development team. All rights reserved."));
         g_print (_("Please report bugs to <%s>."), PACKAGE_BUGREPORT);
         g_print ("\n");
@@ -212,7 +263,7 @@ main (gint argc, gchar **argv)
     }
 
     /* daemonize the process */
-    if (!opt_no_daemon)
+    if (opt_daemon)
     {
         if (daemonize () == -1)
         {
@@ -238,29 +289,55 @@ main (gint argc, gchar **argv)
         return EXIT_FAILURE;
     }
 
-    dbus_connection = dbus_bus_get (DBUS_BUS_SESSION, NULL);
-    if (G_LIKELY (dbus_connection != NULL))
+    setlocale(LC_NUMERIC,"C");
+
+    /* Initialize our data set */
+    memset (&s_data, 0, sizeof (struct t_data_set));
+
+    dbus_connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
+    if (G_LIKELY (!error))
     {
-        dbus_connection_set_exit_on_disconnect (dbus_connection, FALSE);
+        g_object_set(G_OBJECT (dbus_connection), "exit-on-close", TRUE, NULL);
 
-        dbus_flags = DBUS_NAME_FLAG_ALLOW_REPLACEMENT | DBUS_NAME_FLAG_DO_NOT_QUEUE;
-        if (opt_replace)
-          dbus_flags |= DBUS_NAME_FLAG_REPLACE_EXISTING;
+        name_owned_variant = g_dbus_connection_call_sync (dbus_connection,
+                                                          "org.freedesktop.DBus",
+                                                          "/org/freedesktop/DBus",
+                                                          "org.freedesktop.DBus",
+                                                          "NameHasOwner",
+                                                          g_variant_new ("(s)", XFSETTINGS_DBUS_NAME),
+                                                          G_VARIANT_TYPE ("(b)"),
+                                                          G_DBUS_CALL_FLAGS_NONE,
+                                                          -1,
+                                                          NULL,
+                                                          &error);
 
-        result = dbus_bus_request_name (dbus_connection, XFSETTINGS_DBUS_NAME, dbus_flags, NULL);
-        if (result != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
-        {
+        if (G_UNLIKELY (error)) {
+            g_printerr ("%s: %s.\n", G_LOG_DOMAIN, error->message);
+            g_error_free (error);
+            return EXIT_FAILURE;
+        }
+
+        name_owned = FALSE;
+        g_variant_get(name_owned_variant, "(b)", &name_owned, NULL);
+
+        if(G_UNLIKELY (name_owned && !opt_replace)) {
             xfsettings_dbg (XFSD_DEBUG_XSETTINGS, "Another instance is already running. Leaving.");
-            dbus_connection_unref (dbus_connection);
+            g_dbus_connection_close_sync (dbus_connection, NULL, NULL);
             return EXIT_SUCCESS;
         }
 
-        dbus_bus_add_match (dbus_connection, "type='signal',member='NameOwnerChanged',arg0='"XFSETTINGS_DBUS_NAME"'", NULL);
-        dbus_connection_add_filter (dbus_connection, dbus_connection_filter_func, NULL, NULL);
+        /* Allow the settings daemon to be replaced */
+        dbus_flags = G_BUS_NAME_OWNER_FLAGS_NONE;
+        if (opt_replace || name_owned)
+            dbus_flags = G_BUS_NAME_OWNER_FLAGS_REPLACE ;
+
+        owner_id = g_bus_own_name_on_connection (dbus_connection, XFSETTINGS_DBUS_NAME, dbus_flags, on_name_acquired, on_name_lost, &s_data, NULL );
     }
     else
     {
+        g_printerr ("%s: %s.\n", G_LOG_DOMAIN, error->message);
         g_error ("Failed to connect to the dbus session bus.");
+        g_error_free (error);
         return EXIT_FAILURE;
     }
 
@@ -272,48 +349,6 @@ main (gint argc, gchar **argv)
         return EXIT_FAILURE;
     }
 
-    /* connect to session always, even if we quit below.  this way the
-     * session manager won't wait for us to time out. */
-    sm_client = xfce_sm_client_get ();
-    xfce_sm_client_set_restart_style (sm_client, XFCE_SM_CLIENT_RESTART_IMMEDIATELY);
-    xfce_sm_client_set_desktop_file (sm_client, XFSETTINGS_DESKTOP_FILE);
-    xfce_sm_client_set_priority (sm_client, XFCE_SM_CLIENT_PRIORITY_CORE);
-    g_signal_connect (G_OBJECT (sm_client), "quit", G_CALLBACK (gtk_main_quit), NULL);
-    if (!xfce_sm_client_connect (sm_client, &error) && error)
-    {
-        g_printerr ("Failed to connect to session manager: %s\n", error->message);
-        g_clear_error (&error);
-    }
-
-    /* launch settings manager */
-    xsettings_helper = g_object_new (XFCE_TYPE_XSETTINGS_HELPER, NULL);
-    xfce_xsettings_helper_register (XFCE_XSETTINGS_HELPER (xsettings_helper),
-                                    gdk_display_get_default (), opt_replace);
-
-    /* create the sub daemons */
-#ifdef HAVE_XRANDR
-    displays_helper = g_object_new (XFCE_TYPE_DISPLAYS_HELPER, NULL);
-#endif
-    pointer_helper = g_object_new (XFCE_TYPE_POINTERS_HELPER, NULL);
-    keyboards_helper = g_object_new (XFCE_TYPE_KEYBOARDS_HELPER, NULL);
-    accessibility_helper = g_object_new (XFCE_TYPE_ACCESSIBILITY_HELPER, NULL);
-    shortcuts_helper = g_object_new (XFCE_TYPE_KEYBOARD_SHORTCUTS_HELPER, NULL);
-    keyboard_layout_helper = g_object_new (XFCE_TYPE_KEYBOARD_LAYOUT_HELPER, NULL);
-    workspaces_helper = g_object_new (XFCE_TYPE_WORKSPACES_HELPER, NULL);
-    gtk_decorations_helper = g_object_new (XFCE_TYPE_DECORATIONS_HELPER, NULL);
-
-    if (g_getenv ("XFSETTINGSD_NO_CLIPBOARD") == NULL)
-    {
-        clipboard_daemon = g_object_new (GSD_TYPE_CLIPBOARD_MANAGER, NULL);
-        if (!gsd_clipboard_manager_start (GSD_CLIPBOARD_MANAGER (clipboard_daemon), opt_replace))
-        {
-            g_object_unref (G_OBJECT (clipboard_daemon));
-            clipboard_daemon = NULL;
-
-            g_printerr (G_LOG_DOMAIN ": %s\n", "Another clipboard manager is already running.");
-        }
-    }
-
     /* setup signal handlers to properly quit the main loop */
     if (xfce_posix_signal_handler_init (NULL))
     {
@@ -323,36 +358,36 @@ main (gint argc, gchar **argv)
 
     gtk_main();
 
-    /* release the dbus name */
-    if (dbus_connection != NULL)
-    {
-        dbus_connection_remove_filter (dbus_connection, dbus_connection_filter_func, NULL);
-        dbus_bus_release_name (dbus_connection, XFSETTINGS_DBUS_NAME, NULL);
-        dbus_connection_unref (dbus_connection);
-    }
-
     /* release the sub daemons */
-    g_object_unref (G_OBJECT (xsettings_helper));
-#ifdef HAVE_XRANDR
-    g_object_unref (G_OBJECT (displays_helper));
-#endif
-    g_object_unref (G_OBJECT (pointer_helper));
-    g_object_unref (G_OBJECT (keyboards_helper));
-    g_object_unref (G_OBJECT (accessibility_helper));
-    g_object_unref (G_OBJECT (shortcuts_helper));
-    g_object_unref (G_OBJECT (keyboard_layout_helper));
-    g_object_unref (G_OBJECT (workspaces_helper));
-    g_object_unref (G_OBJECT (gtk_decorations_helper));
+    UNREF_GOBJECT(s_data.xsettings_helper);
 
-    if (G_LIKELY (clipboard_daemon != NULL))
+#ifdef HAVE_XRANDR
+    UNREF_GOBJECT (s_data.displays_helper);
+#endif
+    UNREF_GOBJECT (s_data.pointer_helper);
+    UNREF_GOBJECT (s_data.keyboards_helper);
+    UNREF_GOBJECT (s_data.accessibility_helper);
+    UNREF_GOBJECT (s_data.shortcuts_helper);
+    UNREF_GOBJECT (s_data.keyboard_layout_helper);
+    UNREF_GOBJECT (s_data.workspaces_helper);
+    UNREF_GOBJECT (s_data.gtk_decorations_helper);
+
+    if (G_LIKELY (s_data.clipboard_daemon != NULL))
     {
-        gsd_clipboard_manager_stop (GSD_CLIPBOARD_MANAGER (clipboard_daemon));
-        g_object_unref (G_OBJECT (clipboard_daemon));
+        gsd_clipboard_manager_stop (GSD_CLIPBOARD_MANAGER (s_data.clipboard_daemon));
+        UNREF_GOBJECT (s_data.clipboard_daemon);
     }
 
     xfconf_shutdown ();
 
-    g_object_unref (G_OBJECT (sm_client));
+    UNREF_GOBJECT (s_data.sm_client);
+
+    /* release the dbus name */
+    if (dbus_connection != NULL)
+    {
+        g_bus_unown_name (owner_id);
+        g_dbus_connection_close_sync (dbus_connection, NULL, NULL);
+    }
 
     return EXIT_SUCCESS;
 }

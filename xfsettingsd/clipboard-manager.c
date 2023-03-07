@@ -99,7 +99,7 @@ static Atom XA_TIMESTAMP = None;
 
 
 
-G_DEFINE_TYPE (GsdClipboardManager, gsd_clipboard_manager, G_TYPE_OBJECT)
+G_DEFINE_TYPE_WITH_PRIVATE (GsdClipboardManager, gsd_clipboard_manager, G_TYPE_OBJECT)
 
 
 
@@ -109,16 +109,12 @@ gsd_clipboard_manager_class_init (GsdClipboardManagerClass *klass)
         GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
         object_class->finalize = gsd_clipboard_manager_finalize;
-
-        g_type_class_add_private (klass, sizeof (GsdClipboardManagerPrivate));
 }
 
 static void
 gsd_clipboard_manager_init (GsdClipboardManager *manager)
 {
-        manager->priv = G_TYPE_INSTANCE_GET_PRIVATE (manager,
-                                                     GSD_TYPE_CLIPBOARD_MANAGER,
-                                                     GsdClipboardManagerPrivate);
+        manager->priv = gsd_clipboard_manager_get_instance_private (manager);
 
         manager->priv->display = GDK_DISPLAY_XDISPLAY (gdk_display_get_default ());
 
@@ -180,7 +176,7 @@ send_selection_notify (GsdClipboardManager *manager,
         notify.property = success ? manager->priv->property : None;
         notify.time = manager->priv->time;
 
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
         XSendEvent (manager->priv->display,
                     manager->priv->requestor,
@@ -189,7 +185,7 @@ send_selection_notify (GsdClipboardManager *manager,
                     (XEvent *)&notify);
         XSync (manager->priv->display, False);
 
-        if (gdk_error_trap_pop () != 0)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
         {
                 g_critical ("Failed to notify clipboard selection");
         }
@@ -212,14 +208,14 @@ finish_selection_request (GsdClipboardManager *manager,
         notify.property = success ? xev->xselectionrequest.property : None;
         notify.time = xev->xselectionrequest.time;
 
-        gdk_error_trap_push ();
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
         XSendEvent (xev->xselectionrequest.display,
                     xev->xselectionrequest.requestor,
                     False, NoEventMask, (XEvent *) &notify);
         XSync (manager->priv->display, False);
 
-        if (gdk_error_trap_pop () != 0)
+        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
         {
                 g_critical ("Failed to send selection request");
         }
@@ -438,6 +434,8 @@ send_incrementally (GsdClipboardManager *manager,
                          data, items);
 
         if (length == 0) {
+                clipboard_manager_watch_cb (manager, rdata->requestor, False,
+                                            PropertyChangeMask, NULL);
                 manager->priv->conversions = g_slist_remove (manager->priv->conversions, rdata);
                 conversion_free (rdata);
         }
@@ -464,7 +462,7 @@ convert_clipboard_manager (GsdClipboardManager *manager,
                          */
                         finish_selection_request (manager, xev, False);
                 } else {
-                        gdk_error_trap_push ();
+                        gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
                         clipboard_manager_watch_cb (manager,
                                                     xev->xselectionrequest.requestor,
@@ -476,10 +474,10 @@ convert_clipboard_manager (GsdClipboardManager *manager,
                                       StructureNotifyMask);
                         XSync (manager->priv->display, False);
 
-                        if (gdk_error_trap_pop () != Success)
+                        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != Success)
                                 return;
 
-                        gdk_error_trap_push ();
+                        gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
                         if (xev->xselectionrequest.property != None) {
                                 XGetWindowProperty (manager->priv->display,
@@ -489,7 +487,7 @@ convert_clipboard_manager (GsdClipboardManager *manager,
                                                     &type, &format, &nitems, &remaining,
                                                     (guchar **) &targets);
 
-                                if (gdk_error_trap_pop () != Success) {
+                                if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != Success) {
                                         if (targets)
                                                 XFree (targets);
 
@@ -592,9 +590,14 @@ convert_clipboard_target (IncrConversion      *rdata,
                         /* start incremental transfer */
                         rdata->offset = 0;
 
-                        gdk_error_trap_push ();
+                        gdk_x11_display_error_trap_push (gdk_display_get_default ());
 
                         XGetWindowAttributes (manager->priv->display, rdata->requestor, &atts);
+
+                        clipboard_manager_watch_cb (manager, rdata->requestor,
+                                                    True, PropertyChangeMask,
+                                                    NULL);
+
                         XSelectInput (manager->priv->display, rdata->requestor,
                                       atts.your_event_mask | PropertyChangeMask);
 
@@ -605,7 +608,7 @@ convert_clipboard_target (IncrConversion      *rdata,
 
                         XSync (manager->priv->display, False);
 
-                        if (gdk_error_trap_pop () != 0)
+                        if (gdk_x11_display_error_trap_pop (gdk_display_get_default ()) != 0)
                         {
                                 g_critical ("Failed to transfer clipboard contents");
                         }
@@ -713,7 +716,7 @@ clipboard_manager_process_event (GsdClipboardManager *manager,
         switch (xev->xany.type) {
         case DestroyNotify:
                 if (xev->xdestroywindow.window == manager->priv->requestor) {
-                        g_slist_foreach (manager->priv->contents, (GFunc) target_data_unref, NULL);
+                        g_slist_foreach (manager->priv->contents, (GFunc) (void (*)(void)) target_data_unref, NULL);
                         g_slist_free (manager->priv->contents);
                         manager->priv->contents = NULL;
 
@@ -741,7 +744,7 @@ clipboard_manager_process_event (GsdClipboardManager *manager,
                 if (xev->xselectionclear.selection == XA_CLIPBOARD_MANAGER) {
                         /* We lost the manager selection */
                         if (manager->priv->contents) {
-                                g_slist_foreach (manager->priv->contents, (GFunc) target_data_unref, NULL);
+                                g_slist_foreach (manager->priv->contents, (GFunc) (void (*)(void)) target_data_unref, NULL);
                                 g_slist_free (manager->priv->contents);
                                 manager->priv->contents = NULL;
 
@@ -754,7 +757,7 @@ clipboard_manager_process_event (GsdClipboardManager *manager,
                 }
                 if (xev->xselectionclear.selection == XA_CLIPBOARD) {
                         /* We lost the clipboard selection */
-                        g_slist_foreach (manager->priv->contents, (GFunc) target_data_unref, NULL);
+                        g_slist_foreach (manager->priv->contents, (GFunc) (void (*)(void)) target_data_unref, NULL);
                         g_slist_free (manager->priv->contents);
                         manager->priv->contents = NULL;
                         clipboard_manager_watch_cb (manager,
@@ -868,19 +871,11 @@ clipboard_manager_watch_cb (GsdClipboardManager *manager,
         GdkDisplay *display;
 
         display = gdk_display_get_default ();
-#if GTK_CHECK_VERSION (2, 24, 0)
         gdkwin = gdk_x11_window_lookup_for_display (display, window);
-#else
-        gdkwin = gdk_window_lookup_for_display (display, window);
-#endif
 
         if (is_start) {
                 if (gdkwin == NULL) {
-#if GTK_CHECK_VERSION (2, 24, 0)
                         gdkwin = gdk_x11_window_foreign_new_for_display (display, window);
-#else
-                        gdkwin = gdk_window_foreign_new_for_display (display, window);
-#endif
                 } else {
                         g_object_ref (gdkwin);
                 }
@@ -1016,13 +1011,13 @@ gsd_clipboard_manager_stop (GsdClipboardManager *manager)
         }
 
         if (manager->priv->conversions != NULL) {
-                g_slist_foreach (manager->priv->conversions, (GFunc) conversion_free, NULL);
+                g_slist_foreach (manager->priv->conversions, (GFunc) (void (*)(void)) conversion_free, NULL);
                 g_slist_free (manager->priv->conversions);
                 manager->priv->conversions = NULL;
         }
 
         if (manager->priv->contents != NULL) {
-                g_slist_foreach (manager->priv->contents, (GFunc) target_data_unref, NULL);
+                g_slist_foreach (manager->priv->contents, (GFunc) (void (*)(void)) target_data_unref, NULL);
                 g_slist_free (manager->priv->contents);
                 manager->priv->contents = NULL;
         }

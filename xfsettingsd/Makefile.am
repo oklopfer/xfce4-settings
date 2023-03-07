@@ -42,7 +42,6 @@ xfsettingsd_CFLAGS = \
 	$(GLIB_CFLAGS) \
 	$(GTHREAD_CFLAGS) \
 	$(GIO_CFLAGS) \
-	$(DBUS_GLIB_CFLAGS) \
 	$(XFCONF_CFLAGS) \
 	$(LIBXFCE4UTIL_CFLAGS) \
 	$(LIBXFCE4UI_CFLAGS) \
@@ -53,7 +52,13 @@ xfsettingsd_CFLAGS = \
 	$(LIBNOTIFY_CFLAGS) \
 	$(FONTCONFIG_CFLAGS) \
 	$(LIBINPUT_CFLAGS) \
-	$(PLATFORM_CFLAGS)
+	$(PLATFORM_CFLAGS) \
+    -DGTK_DISABLE_SINGLE_INCLUDES \
+    -DGDK_DISABLE_DEPRECATED \
+    -DGTK_DISABLE_DEPRECATED \
+    -DGSEAL_ENABLE \
+    -DGDK_PIXBUF_DISABLE_DEPRECATED \
+    -DG_DISABLE_DEPRECATED
 
 xfsettingsd_LDFLAGS = \
 	-no-undefined \
@@ -64,7 +69,6 @@ xfsettingsd_LDADD = \
 	$(GLIB_LIBS) \
 	$(GTHREAD_LIBS) \
 	$(GIO_LIBS) \
-	$(DBUS_GLIB_LIBS) \
 	$(XFCONF_LIBS) \
 	$(LIBXFCE4UTIL_LIBS) \
 	$(LIBXFCE4UI_LIBS) \
@@ -89,7 +93,8 @@ xfsettingsd_CFLAGS += \
 	$(XRANDR_CFLAGS)
 
 xfsettingsd_LDADD += \
-	$(XRANDR_LIBS)
+	$(XRANDR_LIBS) \
+	$(top_builddir)/common/libxfce4-settings.la
 
 if HAVE_UPOWERGLIB
 xfsettingsd_SOURCES += \
