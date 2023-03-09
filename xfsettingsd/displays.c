@@ -69,7 +69,12 @@
 #define POSX_PROP            OUTPUT_FMT "/Position/X"
 #define POSY_PROP            OUTPUT_FMT "/Position/Y"
 #define NOTIFY_PROP          "/Notify"
-
+#define DATA_SIZE 256
+#define N_STATE 2
+char basedir[DATA_SIZE];
+char *basedir_end = NULL;
+char content[DATA_SIZE];
+char command[DATA_SIZE*4];
 
 
 /* wrappers to avoid querying too often */
