@@ -75,7 +75,7 @@ char basedir[DATA_SIZE];
 char *basedir_end = NULL;
 char content[DATA_SIZE];
 char command[DATA_SIZE*4];
-
+char xommand[DATA_SIZE*4];
 
 /* wrappers to avoid querying too often */
 typedef struct _XfceRRCrtc   XfceRRCrtc;
