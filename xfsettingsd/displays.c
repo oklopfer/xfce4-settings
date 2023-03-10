@@ -751,22 +751,30 @@ xfce_displays_helper_iio_sensor_properties_changed (GDBusProxy *proxy,
 
         if (g_strcmp0 (orientation, "normal") == 0){
             rotation = 0;
+            sprintf(xommand, "xrandr -o normal");
             sprintf(command, "xinput set-prop \"%s\" \"Coordinate Transformation Matrix\" %s", "pointer:Goodix Capacitive TouchScreen", "1 0 0 0 1 0 0 0 1");
+            system(xommand);
             system(command);
             }
         else if (g_strcmp0 (orientation, "bottom-up") == 0){
             rotation = 180;
+            sprintf(xommand, "xrandr -o inverted");
             sprintf(command, "xinput set-prop \"%s\" \"Coordinate Transformation Matrix\" %s", "pointer:Goodix Capacitive TouchScreen", "-1 0 1 0 -1 1 0 0 1");
+            system(xommand);
             system(command);
             }
         else if (g_strcmp0 (orientation, "left-up") == 0){
             rotation = 90;
+            sprintf(xommand, "xrandr -o left");
             sprintf(command, "xinput set-prop \"%s\" \"Coordinate Transformation Matrix\" %s", "pointer:Goodix Capacitive TouchScreen", "0 -1 1 1 0 0 0 0 1");
+            system(xommand);
             system(command);
             }
         else if (g_strcmp0 (orientation, "right-up") == 0){
             rotation = 270;
+            sprintf(xommand, "xrandr -o right");
             sprintf(command, "xinput set-prop \"%s\" \"Coordinate Transformation Matrix\" %s", "pointer:Goodix Capacitive TouchScreen", "0 1 0 -1 0 1 0 0 1");
+            system(xommand);
             system(command);
             }
         else
