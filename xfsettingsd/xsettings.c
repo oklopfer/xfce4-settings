@@ -459,15 +459,16 @@ xfce_xsettings_helper_prop_changed (XfconfChannel       *channel,
     xfsettings_dbg_filtered (XFSD_DEBUG_XSETTINGS, "prop \"%s\" changed (type=%s)",
                              prop_name, G_VALUE_TYPE_NAME (value));
 
-    if (G_LIKELY (value != NULL))
+    if (G_LIKELY (G_VALUE_TYPE (value) != G_TYPE_INVALID))
     {
         setting = g_hash_table_lookup (helper->settings, prop_name);
         if (G_LIKELY (setting != NULL))
         {
-            /* update the value, assuming the types match because
-             * you cannot changes types in xfconf without removing
-             * it first */
-            g_value_reset (setting->value);
+            /* update the value, without assuming the types match because
+             * you can change type in xfconf without removing it first
+             * e.g. via xfconf_channel_set_property() */
+            g_value_unset (setting->value);
+            g_value_init (setting->value, G_VALUE_TYPE (value));
             g_value_copy (value, setting->value);
 
             /* update the serial */

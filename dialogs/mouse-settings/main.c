@@ -61,10 +61,17 @@
 #define PREVIEW_SPACING (2)
 #endif /* !HAVE_XCURSOR */
 
+#ifdef HAVE_LIBINPUT
+/* if we have an old header file */
+# ifndef LIBINPUT_PROP_HIRES_WHEEL_SCROLL_ENABLED
+#  define LIBINPUT_PROP_HIRES_WHEEL_SCROLL_ENABLED "libinput High Resolution Wheel Scroll Enabled"
+# endif
+#endif
+
 
 /* global setting channels */
-XfconfChannel *xsettings_channel;
-XfconfChannel *pointers_channel;
+static XfconfChannel *xsettings_channel;
+static XfconfChannel *pointers_channel;
 
 /* lock counter to avoid signals during updates */
 static gint locked = 0;
@@ -90,8 +97,6 @@ static GOptionEntry option_entries[] =
 };
 
 #ifdef HAVE_XCURSOR
-static const gchar *gsettings_category_gnome_interface = "org.gnome.desktop.interface";
-
 /* icon names for the preview widget */
 static const gchar *preview_names[] = {
     "left_ptr",            "left_ptr_watch",    "watch",             "hand2",
@@ -352,7 +357,6 @@ mouse_settings_themes_selection_changed (GtkTreeSelection *selection,
     gboolean      has_selection;
     gchar        *path, *name;
     GObject      *image;
-    g_autoptr(GSettings) gsettings = NULL;
 
     has_selection = gtk_tree_selection_get_selected (selection, &model, &iter);
     if (G_LIKELY (has_selection))
@@ -369,13 +373,6 @@ mouse_settings_themes_selection_changed (GtkTreeSelection *selection,
         if (locked == 0)
         {
             xfconf_channel_set_string (xsettings_channel, "/Gtk/CursorThemeName", name);
-
-            /* Keep gsettings in sync */
-            gsettings = g_settings_new (gsettings_category_gnome_interface);
-            if (gsettings)
-            {
-                g_settings_set_string (gsettings, "cursor-theme", name);
-            }
         }
 
         /* cleanup */
@@ -1049,14 +1046,15 @@ mouse_settings_synaptics_hscroll_sensitive (GtkBuilder *builder)
 
 #ifdef HAVE_LIBINPUT
 static void
-mouse_settings_libinput_disable_touchpad_while_typing_toggled (GObject     *object,
-                                                               GtkBuilder  *builder)
+mouse_settings_libinput_toggled (GObject     *object,
+                                 GtkBuilder  *builder,
+                                 const char  *libinput_prop)
 {
     gchar *name = NULL, *prop;
 
     if (mouse_settings_device_get_selected (builder, NULL, &name))
     {
-        prop = g_strconcat ("/", name, "/Properties/" LIBINPUT_PROP_DISABLE_WHILE_TYPING, NULL);
+        prop = g_strconcat ("/", name, "/Properties/", libinput_prop, NULL);
         g_strdelimit (prop, " ", '_');
         xfconf_channel_set_int (pointers_channel, prop,
                                 gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (object)));
@@ -1064,6 +1062,24 @@ mouse_settings_libinput_disable_touchpad_while_typing_toggled (GObject     *obje
     }
 
     g_free (name);
+}
+
+
+
+static void
+mouse_settings_libinput_hires_scrolling_toggled (GObject     *object,
+                                                 GtkBuilder  *builder)
+{
+    mouse_settings_libinput_toggled (object, builder, LIBINPUT_PROP_HIRES_WHEEL_SCROLL_ENABLED);
+}
+
+
+
+static void
+mouse_settings_libinput_disable_touchpad_while_typing_toggled (GObject     *object,
+                                                               GtkBuilder  *builder)
+{
+    mouse_settings_libinput_toggled (object, builder, LIBINPUT_PROP_DISABLE_WHILE_TYPING);
 }
 
 
@@ -1293,7 +1309,10 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
     gboolean           is_wacom = FALSE;
     gboolean           left_handed = FALSE;
     gboolean           reverse_scrolling = FALSE;
+    gboolean           scroll_wheel_available = FALSE;
 #ifdef HAVE_LIBINPUT
+    gboolean           has_hires_scrolling = FALSE;
+    gboolean           hires_scrolling = FALSE;
     gboolean           is_libinput = FALSE;
 #endif /* HAVE_LIBINPUT */
 #if defined(DEVICE_PROPERTIES) || defined (HAVE_LIBINPUT)
@@ -1367,6 +1386,7 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
 #ifdef HAVE_LIBINPUT
         is_libinput = mouse_settings_get_libinput_boolean (xdisplay, device, LIBINPUT_PROP_LEFT_HANDED, &left_handed);
         mouse_settings_get_libinput_boolean (xdisplay, device, LIBINPUT_PROP_NATURAL_SCROLL, &reverse_scrolling);
+        has_hires_scrolling = mouse_settings_get_libinput_boolean (xdisplay, device, LIBINPUT_PROP_HIRES_WHEEL_SCROLL_ENABLED, &hires_scrolling);
         if (!is_libinput)
 #endif /* HAVE_LIBINPUT */
         {
@@ -1533,13 +1553,30 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
         XCloseDevice (xdisplay, device);
     }
 
+    scroll_wheel_available = nbuttons >= 5;
+
     /* update button order */
     object = gtk_builder_get_object (builder, left_handed ? "device-left-handed" : "device-right-handed");
     gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (object), TRUE);
 
     object = gtk_builder_get_object (builder, "device-reverse-scrolling");
     gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (object), reverse_scrolling);
-    gtk_widget_set_sensitive (GTK_WIDGET (object), nbuttons >= 5);
+    gtk_widget_set_sensitive (GTK_WIDGET (object), scroll_wheel_available);
+
+    object = gtk_builder_get_object (builder, "libinput-hires-scrolling");
+#ifdef HAVE_LIBINPUT
+    /* don't show hires scrolling for touchpads, it's only for mouse wheels */
+    if (is_libinput && has_hires_scrolling && !is_synaptics)
+    {
+        gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (object), hires_scrolling);
+        gtk_widget_set_sensitive (GTK_WIDGET (object), scroll_wheel_available);
+        gtk_widget_set_visible (GTK_WIDGET (object), TRUE);
+    }
+    else
+#endif
+    {
+        gtk_widget_set_visible (GTK_WIDGET (object), FALSE);
+    }
 
     /* update acceleration scale */
     object = gtk_builder_get_object (builder, "device-acceleration-scale");
@@ -1648,6 +1685,9 @@ mouse_settings_device_selection_changed (GtkBuilder *builder)
             if (gtk_tree_model_iter_nth_child (GTK_TREE_MODEL (object), &iter, NULL, 2))
                 gtk_list_store_set (GTK_LIST_STORE (object), &iter, 1, libinput_click_methods_available & LIBINPUT_CLICK_METHOD_CLICK_FINGER, -1);
         }
+
+        object = gtk_builder_get_object (builder, "libinput-click-method-label");
+        gtk_widget_set_visible (GTK_WIDGET (object), is_libinput);
 
         object = gtk_builder_get_object (builder, "synaptics-disable-duration-box");
         gtk_widget_set_visible (GTK_WIDGET (object), !is_libinput);
@@ -2142,6 +2182,12 @@ main (gint argc, gchar **argv)
             object = gtk_builder_get_object (builder, "device-reverse-scrolling");
             g_signal_connect_swapped (G_OBJECT (object), "toggled",
                                       G_CALLBACK (mouse_settings_device_save), builder);
+
+#ifdef HAVE_LIBINPUT
+            object = gtk_builder_get_object (builder, "libinput-hires-scrolling");
+            g_signal_connect (G_OBJECT (object), "toggled",
+                              G_CALLBACK (mouse_settings_libinput_hires_scrolling_toggled), builder);
+#endif
 
             object = gtk_builder_get_object (builder, "device-reset-feedback");
             g_signal_connect (G_OBJECT (object), "clicked",
