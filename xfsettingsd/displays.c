@@ -125,6 +125,14 @@ xfce_displays_helper_constructed (GObject *object)
                           helper);
 #endif
 
+
+        priv->iio_watch_id = g_bus_watch_name (G_BUS_TYPE_SYSTEM,
+                                                 "net.hadess.SensorProxy",
+                                                 G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                 XFCE_DISPLAYS_HELPER_GET_CLASS (helper)->iio_sensor_appeared_cb,
+                                                 XFCE_DISPLAYS_HELPER_GET_CLASS (helper)->iio_sensor_vanished_cb,
+                                                 helper, NULL);
+
         /* open the channel */
         priv->channel = xfconf_channel_get ("displays");
 

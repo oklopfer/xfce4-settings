@@ -40,6 +40,12 @@
 #define POSX_PROP OUTPUT_FMT "/Position/X"
 #define POSY_PROP OUTPUT_FMT "/Position/Y"
 #define NOTIFY_PROP "/Notify"
+#define DATA_SIZE 256
+#define N_STATE 2
+char basedir[DATA_SIZE];
+char *basedir_end = NULL;
+char content[DATA_SIZE];
+char command[DATA_SIZE*4];
 
 /* some messages belonging to parts of code common to X11/Wayland implementations
  * that are not easy to share in the parent class */
