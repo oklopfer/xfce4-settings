@@ -48,13 +48,17 @@
 
 #define get_instance_private(instance) \
     ((XfceDisplaysHelperPrivate *) xfce_displays_helper_get_instance_private (XFCE_DISPLAYS_HELPER (instance)))
+#define DATA_SIZE 256
+#define N_STATE 2
+char basedir[DATA_SIZE];
+char *basedir_end = NULL;
+char content[DATA_SIZE];
+char command[DATA_SIZE*4];
 
 static void
 xfce_displays_helper_constructed (GObject *object);
 static void
 xfce_displays_helper_finalize (GObject *object);
-
-
 
 typedef struct _XfceDisplaysHelperPrivate
 {
