@@ -193,8 +193,9 @@ static void
 xfce_displays_helper_iio_sensor_appeared_cb (GDBusConnection *connection,
                                              const gchar     *name,
                                              const gchar     *name_owner,
-                                             XfceDisplaysHelper *helper)
+                                             void            *data)
 {
+    XfceDisplaysHelper *helper = XFCE_DISPLAYS_HELPER (data);
     GError *error = NULL;
     XfceDisplaysHelperPrivate *priv = get_instance_private (helper);
 
@@ -220,8 +221,9 @@ xfce_displays_helper_iio_sensor_appeared_cb (GDBusConnection *connection,
 static void
 xfce_displays_helper_iio_sensor_vanished_cb (GDBusConnection *connection,
                                              const gchar     *name,
-                                             XfceDisplaysHelper *helper)
+                                             void            *data)
 {
+    XfceDisplaysHelper *helper = XFCE_DISPLAYS_HELPER (data);
     XfceDisplaysHelperPrivate *priv = get_instance_private (helper);
     if (priv->iio_proxy) {
         g_clear_object (&priv->iio_proxy);
